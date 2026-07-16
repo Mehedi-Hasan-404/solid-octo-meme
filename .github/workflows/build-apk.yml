@@ -347,6 +347,7 @@ jobs:
 
           import android.content.ContentValues
           import android.net.Uri
+          import android.app.PictureInPictureParams
           import android.os.Bundle
           import android.os.Environment
           import android.os.Handler
@@ -422,6 +423,10 @@ jobs:
 
                   binding.buttonProcess.setOnClickListener {
                       processVideo()
+                  }
+
+                  binding.buttonPip.setOnClickListener {
+                      enterPictureInPictureMode(PictureInPictureParams.Builder().build())
                   }
               }
 
