@@ -124,6 +124,8 @@ jobs:
               implementation 'androidx.media3:media3-transformer:1.4.1'
               implementation 'androidx.media3:media3-common:1.4.1'
               implementation 'androidx.media3:media3-effect:1.4.1'
+              implementation 'androidx.media3:media3-exoplayer:1.4.1'
+              implementation 'androidx.media3:media3-ui:1.4.1'
           }
           APP_BUILD_GRADLE
 
@@ -171,92 +173,130 @@ jobs:
         run: |
           cat > app/src/main/res/layout/activity_main.xml <<'ACTIVITY_MAIN_XML'
           <?xml version="1.0" encoding="utf-8"?>
-          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:app="http://schemas.android.com/apk/res-auto"
               android:layout_width="match_parent"
-              android:layout_height="match_parent"
-              android:orientation="vertical"
-              android:padding="16dp">
+              android:layout_height="match_parent">
 
-              <Button
-                  android:id="@+id/buttonSelectVideo"
+              <LinearLayout
                   android:layout_width="match_parent"
                   android:layout_height="wrap_content"
-                  android:text="Select Video" />
+                  android:orientation="vertical"
+                  android:padding="16dp">
 
-              <TextView
-                  android:id="@+id/textSelectedFile"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="8dp"
-                  android:text="No video selected" />
-
-              <EditText
-                  android:id="@+id/editStart"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="16dp"
-                  android:hint="Start time in seconds"
-                  android:inputType="numberDecimal" />
-
-              <EditText
-                  android:id="@+id/editEnd"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="8dp"
-                  android:hint="End time in seconds"
-                  android:inputType="numberDecimal" />
-
-              <RadioGroup
-                  android:id="@+id/radioGroupQuality"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="16dp"
-                  android:orientation="horizontal">
-
-                  <RadioButton
-                      android:id="@+id/radioHigh"
-                      android:layout_width="wrap_content"
+                  <Button
+                      android:id="@+id/buttonSelectVideo"
+                      android:layout_width="match_parent"
                       android:layout_height="wrap_content"
-                      android:checked="true"
-                      android:text="High" />
+                      android:text="Select Video" />
 
-                  <RadioButton
-                      android:id="@+id/radioMedium"
-                      android:layout_width="wrap_content"
+                  <TextView
+                      android:id="@+id/textSelectedFile"
+                      android:layout_width="match_parent"
                       android:layout_height="wrap_content"
-                      android:layout_marginStart="16dp"
-                      android:text="Medium" />
+                      android:layout_marginTop="8dp"
+                      android:text="No video selected" />
 
-                  <RadioButton
-                      android:id="@+id/radioLow"
-                      android:layout_width="wrap_content"
+                  <androidx.media3.ui.PlayerView
+                      android:id="@+id/playerView"
+                      android:layout_width="match_parent"
+                      android:layout_height="220dp"
+                      android:layout_marginTop="8dp"
+                      android:visibility="gone"
+                      app:use_controller="true" />
+
+                  <LinearLayout
+                      android:layout_width="match_parent"
                       android:layout_height="wrap_content"
-                      android:layout_marginStart="16dp"
-                      android:text="Low" />
-              </RadioGroup>
+                      android:layout_marginTop="16dp"
+                      android:orientation="horizontal">
 
-              <Button
-                  android:id="@+id/buttonProcess"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="16dp"
-                  android:text="Cut and Export" />
+                      <EditText
+                          android:id="@+id/editStart"
+                          android:layout_width="0dp"
+                          android:layout_height="wrap_content"
+                          android:layout_weight="1"
+                          android:hint="Start (seconds)"
+                          android:inputType="numberDecimal" />
 
-              <ProgressBar
-                  android:id="@+id/progressBar"
-                  android:layout_width="wrap_content"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="16dp"
-                  android:layout_gravity="center"
-                  android:visibility="gone" />
+                      <Button
+                          android:id="@+id/buttonSetStart"
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginStart="8dp"
+                          android:text="Set" />
+                  </LinearLayout>
 
-              <TextView
-                  android:id="@+id/textStatus"
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:layout_marginTop="16dp" />
+                  <LinearLayout
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp"
+                      android:orientation="horizontal">
 
-          </LinearLayout>
+                      <EditText
+                          android:id="@+id/editEnd"
+                          android:layout_width="0dp"
+                          android:layout_height="wrap_content"
+                          android:layout_weight="1"
+                          android:hint="End (seconds)"
+                          android:inputType="numberDecimal" />
+
+                      <Button
+                          android:id="@+id/buttonSetEnd"
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginStart="8dp"
+                          android:text="Set" />
+                  </LinearLayout>
+
+                  <EditText
+                      android:id="@+id/editHeight"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      android:hint="Target height in px, blank for original"
+                      android:inputType="number" />
+
+                  <EditText
+                      android:id="@+id/editWidth"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp"
+                      android:hint="Target width in px, blank to keep aspect ratio"
+                      android:inputType="number" />
+
+                  <EditText
+                      android:id="@+id/editBitrate"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp"
+                      android:hint="Target bitrate in bps, blank for original"
+                      android:inputType="number" />
+
+                  <Button
+                      android:id="@+id/buttonProcess"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      android:text="Cut and Export" />
+
+                  <ProgressBar
+                      android:id="@+id/progressBar"
+                      style="@android:style/Widget.ProgressBar.Horizontal"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      android:max="100"
+                      android:visibility="gone" />
+
+                  <TextView
+                      android:id="@+id/textStatus"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp" />
+
+              </LinearLayout>
+          </ScrollView>
           ACTIVITY_MAIN_XML
 
       - name: Write MainActivity.kt
@@ -267,6 +307,8 @@ jobs:
           import android.net.Uri
           import android.os.Bundle
           import android.os.Environment
+          import android.os.Handler
+          import android.os.Looper
           import android.view.View
           import android.widget.Toast
           import androidx.activity.result.contract.ActivityResultContracts
@@ -274,12 +316,14 @@ jobs:
           import androidx.media3.common.MediaItem
           import androidx.media3.common.MimeTypes
           import androidx.media3.effect.Presentation
+          import androidx.media3.exoplayer.ExoPlayer
           import androidx.media3.transformer.Composition
           import androidx.media3.transformer.DefaultEncoderFactory
           import androidx.media3.transformer.EditedMediaItem
           import androidx.media3.transformer.Effects
           import androidx.media3.transformer.ExportException
           import androidx.media3.transformer.ExportResult
+          import androidx.media3.transformer.ProgressHolder
           import androidx.media3.transformer.Transformer
           import androidx.media3.transformer.VideoEncoderSettings
           import com.example.videotrim.databinding.ActivityMainBinding
@@ -289,12 +333,30 @@ jobs:
 
               private lateinit var binding: ActivityMainBinding
               private var selectedUri: Uri? = null
+              private var player: ExoPlayer? = null
+              private var transformer: Transformer? = null
+              private val progressHolder = ProgressHolder()
+              private val progressHandler = Handler(Looper.getMainLooper())
+
+              private val progressRunnable = object : Runnable {
+                  override fun run() {
+                      val state = transformer?.getProgress(progressHolder)
+                      if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                          binding.progressBar.progress = progressHolder.progress
+                          binding.textStatus.text = "${progressHolder.progress}%"
+                          progressHandler.postDelayed(this, 300)
+                      } else if (state != Transformer.PROGRESS_STATE_NOT_STARTED) {
+                          progressHandler.postDelayed(this, 300)
+                      }
+                  }
+              }
 
               private val pickVideoLauncher =
                   registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
                       if (uri != null) {
                           selectedUri = uri
                           binding.textSelectedFile.text = uri.toString()
+                          previewVideo(uri)
                       }
                   }
 
@@ -307,9 +369,27 @@ jobs:
                       pickVideoLauncher.launch("video/*")
                   }
 
+                  binding.buttonSetStart.setOnClickListener {
+                      player?.let { binding.editStart.setText((it.currentPosition / 1000.0).toString()) }
+                  }
+
+                  binding.buttonSetEnd.setOnClickListener {
+                      player?.let { binding.editEnd.setText((it.currentPosition / 1000.0).toString()) }
+                  }
+
                   binding.buttonProcess.setOnClickListener {
                       processVideo()
                   }
+              }
+
+              private fun previewVideo(uri: Uri) {
+                  player?.release()
+                  val exoPlayer = ExoPlayer.Builder(this).build()
+                  exoPlayer.setMediaItem(MediaItem.fromUri(uri))
+                  exoPlayer.prepare()
+                  binding.playerView.player = exoPlayer
+                  binding.playerView.visibility = View.VISIBLE
+                  player = exoPlayer
               }
 
               private fun processVideo() {
@@ -330,17 +410,9 @@ jobs:
                   val startMs = (startSeconds * 1000).toLong()
                   val endMs = (endSeconds * 1000).toLong()
 
-                  val targetHeight = when (binding.radioGroupQuality.checkedRadioButtonId) {
-                      binding.radioMedium.id -> 720
-                      binding.radioLow.id -> 480
-                      else -> null
-                  }
-
-                  val targetBitrate = when (binding.radioGroupQuality.checkedRadioButtonId) {
-                      binding.radioMedium.id -> 4_000_000
-                      binding.radioLow.id -> 1_500_000
-                      else -> null
-                  }
+                  val targetHeight = binding.editHeight.text.toString().toIntOrNull()
+                  val targetWidth = binding.editWidth.text.toString().toIntOrNull()
+                  val targetBitrate = binding.editBitrate.text.toString().toIntOrNull()
 
                   val outputDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
                   val outputFile = File(outputDir, "trimmed_${System.currentTimeMillis()}.mp4")
@@ -357,7 +429,20 @@ jobs:
 
                   val editedMediaItemBuilder = EditedMediaItem.Builder(mediaItem)
 
-                  if (targetHeight != null) {
+                  if (targetWidth != null && targetHeight != null) {
+                      editedMediaItemBuilder.setEffects(
+                          Effects(
+                              emptyList(),
+                              listOf(
+                                  Presentation.createForWidthAndHeight(
+                                      targetWidth,
+                                      targetHeight,
+                                      Presentation.LAYOUT_SCALE_TO_FIT
+                                  )
+                              )
+                          )
+                      )
+                  } else if (targetHeight != null) {
                       editedMediaItemBuilder.setEffects(
                           Effects(emptyList(), listOf(Presentation.createForHeight(targetHeight)))
                       )
@@ -367,8 +452,10 @@ jobs:
                       .setVideoMimeType(MimeTypes.VIDEO_H264)
                       .addListener(object : Transformer.Listener {
                           override fun onCompleted(composition: Composition, result: ExportResult) {
+                              progressHandler.removeCallbacks(progressRunnable)
                               binding.progressBar.visibility = View.GONE
                               binding.textStatus.text = "Saved to ${outputFile.absolutePath}"
+                              previewVideo(Uri.fromFile(outputFile))
                           }
 
                           override fun onError(
@@ -376,6 +463,7 @@ jobs:
                               result: ExportResult,
                               exception: ExportException
                           ) {
+                              progressHandler.removeCallbacks(progressRunnable)
                               binding.progressBar.visibility = View.GONE
                               binding.textStatus.text = "Error: ${exception.message}"
                           }
@@ -394,9 +482,25 @@ jobs:
                   }
 
                   binding.progressBar.visibility = View.VISIBLE
-                  binding.textStatus.text = ""
+                  binding.progressBar.progress = 0
+                  binding.textStatus.text = "0%"
 
-                  transformerBuilder.build().start(editedMediaItemBuilder.build(), outputFile.absolutePath)
+                  val newTransformer = transformerBuilder.build()
+                  transformer = newTransformer
+                  newTransformer.start(editedMediaItemBuilder.build(), outputFile.absolutePath)
+                  progressHandler.post(progressRunnable)
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  player?.pause()
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  progressHandler.removeCallbacks(progressRunnable)
+                  player?.release()
+                  player = null
               }
           }
           MAIN_ACTIVITY
