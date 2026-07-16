@@ -383,6 +383,8 @@ jobs:
           import android.content.pm.PackageManager
           import android.content.res.Configuration
           import android.graphics.Rect
+          import android.util.Rational
+          import androidx.media3.common.VideoSize
           import android.graphics.drawable.Icon
           import android.net.Uri
           import android.os.Build
@@ -417,6 +419,7 @@ jobs:
               private var player: ExoPlayer? = null
               private var pipReceiverRegistered = false
               private var exportReceiverRegistered = false
+              private var videoAspectRatio: Rational? = null
 
               private val pipActionReceiver = object : BroadcastReceiver() {
                   override fun onReceive(context: Context?, intent: Intent?) {
@@ -473,6 +476,8 @@ jobs:
                       }
                   }
 
+              private var lastSystemBarInsets = androidx.core.graphics.Insets.NONE
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   binding = ActivityMainBinding.inflate(layoutInflater)
@@ -480,12 +485,10 @@ jobs:
 
                   ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, insets ->
                       val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-                      view.setPadding(
-                          systemBars.left + view.paddingLeft,
-                          systemBars.top,
-                          systemBars.right + view.paddingRight,
-                          systemBars.bottom
-                      )
+                      lastSystemBarInsets = systemBars
+                      if (!isInPictureInPictureMode) {
+                          view.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+                      }
                       insets
                   }
 
@@ -552,6 +555,15 @@ jobs:
                   return RemoteAction(Icon.createWithResource(this, iconResId), title, title, pendingIntent)
               }
 
+              private fun clampedAspectRatio(width: Int, height: Int): Rational {
+                  val ratio = width.toDouble() / height.toDouble()
+                  return when {
+                      ratio > 2.39 -> Rational(239, 100)
+                      ratio < 1.0 / 2.39 -> Rational(100, 239)
+                      else -> Rational(width, height)
+                  }
+              }
+
               private fun buildPipParams(): PictureInPictureParams {
                   val isPlaying = player?.playWhenReady == true
                   val playPauseIcon = if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
@@ -562,10 +574,11 @@ jobs:
                   )
                   val sourceRect = Rect()
                   binding.playerView.getGlobalVisibleRect(sourceRect)
-                  return PictureInPictureParams.Builder()
+                  val builder = PictureInPictureParams.Builder()
                       .setActions(actions)
                       .setSourceRectHint(sourceRect)
-                      .build()
+                  videoAspectRatio?.let { builder.setAspectRatio(it) }
+                  return builder.build()
               }
 
               override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
@@ -576,8 +589,15 @@ jobs:
                   binding.bottomControls.visibility = visibility
                   if (isInPictureInPictureMode) {
                       binding.buttonPip.visibility = View.GONE
+                      binding.root.setPadding(0, 0, 0, 0)
                   } else {
                       binding.playerView.showController()
+                      binding.root.setPadding(
+                          lastSystemBarInsets.left,
+                          lastSystemBarInsets.top,
+                          lastSystemBarInsets.right,
+                          lastSystemBarInsets.bottom
+                      )
                   }
               }
 
@@ -595,6 +615,13 @@ jobs:
                   exoPlayer.addListener(object : Player.Listener {
                       override fun onIsPlayingChanged(isPlaying: Boolean) {
                           updatePipActions()
+                      }
+
+                      override fun onVideoSizeChanged(videoSize: VideoSize) {
+                          if (videoSize.width > 0 && videoSize.height > 0) {
+                              videoAspectRatio = clampedAspectRatio(videoSize.width, videoSize.height)
+                              updatePipActions()
+                          }
                       }
                   })
                   binding.playerView.player = exoPlayer
