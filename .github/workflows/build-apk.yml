@@ -187,8 +187,10 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
               xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:id="@+id/rootScroll"
               android:layout_width="match_parent"
-              android:layout_height="match_parent">
+              android:layout_height="match_parent"
+              android:clipToPadding="false">
 
               <LinearLayout
                   android:layout_width="match_parent"
@@ -223,13 +225,30 @@ jobs:
                       android:layout_marginTop="8dp"
                       android:visibility="gone" />
 
-                  <androidx.media3.ui.PlayerView
-                      android:id="@+id/playerView"
+                  <FrameLayout
                       android:layout_width="match_parent"
-                      android:layout_height="220dp"
-                      android:layout_marginTop="4dp"
-                      android:visibility="gone"
-                      app:use_controller="true" />
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="4dp">
+
+                      <androidx.media3.ui.PlayerView
+                          android:id="@+id/playerView"
+                          android:layout_width="match_parent"
+                          android:layout_height="220dp"
+                          android:visibility="gone"
+                          app:use_controller="true" />
+
+                      <ImageButton
+                          android:id="@+id/buttonPip"
+                          android:layout_width="40dp"
+                          android:layout_height="40dp"
+                          android:layout_gravity="top|end"
+                          android:layout_margin="8dp"
+                          android:background="#66000000"
+                          android:contentDescription="Picture in Picture"
+                          android:padding="8dp"
+                          android:src="@android:drawable/ic_menu_crop"
+                          android:visibility="gone" />
+                  </FrameLayout>
 
                   <LinearLayout
                       android:id="@+id/bottomControls"
@@ -312,13 +331,6 @@ jobs:
                       android:layout_marginTop="16dp"
                       android:text="Cut and Export" />
 
-                  <Button
-                      android:id="@+id/buttonPip"
-                      android:layout_width="match_parent"
-                      android:layout_height="wrap_content"
-                      android:layout_marginTop="8dp"
-                      android:text="Picture in Picture" />
-
                   <ProgressBar
                       android:id="@+id/progressBar"
                       style="@android:style/Widget.ProgressBar.Horizontal"
@@ -345,8 +357,7 @@ jobs:
           cat > app/src/main/java/com/example/videotrim/MainActivity.kt <<'MAIN_ACTIVITY'
           package com.example.videotrim
 
-          import android.content.ContentValues
-          import android.net.Uri
+          import android.Manifest
           import android.app.PendingIntent
           import android.app.PictureInPictureParams
           import android.app.RemoteAction
@@ -354,34 +365,22 @@ jobs:
           import android.content.Context
           import android.content.Intent
           import android.content.IntentFilter
+          import android.content.pm.PackageManager
           import android.graphics.drawable.Icon
+          import android.net.Uri
           import android.os.Build
           import android.os.Bundle
-          import android.os.Environment
-          import android.os.Handler
-          import android.os.Looper
-          import android.provider.MediaStore
           import android.view.View
           import android.widget.Toast
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.appcompat.app.AppCompatActivity
           import androidx.core.content.ContextCompat
+          import androidx.core.view.ViewCompat
+          import androidx.core.view.WindowInsetsCompat
           import androidx.media3.common.MediaItem
-          import androidx.media3.common.MimeTypes
           import androidx.media3.common.Player
-          import androidx.media3.effect.Presentation
           import androidx.media3.exoplayer.ExoPlayer
-          import androidx.media3.transformer.Composition
-          import androidx.media3.transformer.DefaultEncoderFactory
-          import androidx.media3.transformer.EditedMediaItem
-          import androidx.media3.transformer.Effects
-          import androidx.media3.transformer.ExportException
-          import androidx.media3.transformer.ExportResult
-          import androidx.media3.transformer.ProgressHolder
-          import androidx.media3.transformer.Transformer
-          import androidx.media3.transformer.VideoEncoderSettings
           import com.example.videotrim.databinding.ActivityMainBinding
-          import java.io.File
 
           class MainActivity : AppCompatActivity() {
 
@@ -398,10 +397,8 @@ jobs:
               private lateinit var binding: ActivityMainBinding
               private var selectedUri: Uri? = null
               private var player: ExoPlayer? = null
-              private var transformer: Transformer? = null
               private var pipReceiverRegistered = false
-              private val progressHolder = ProgressHolder()
-              private val progressHandler = Handler(Looper.getMainLooper())
+              private var exportReceiverRegistered = false
 
               private val pipActionReceiver = object : BroadcastReceiver() {
                   override fun onReceive(context: Context?, intent: Intent?) {
@@ -419,18 +416,35 @@ jobs:
                   }
               }
 
-              private val progressRunnable = object : Runnable {
-                  override fun run() {
-                      val state = transformer?.getProgress(progressHolder)
-                      if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
-                          binding.progressBar.progress = progressHolder.progress
-                          binding.textStatus.text = "${progressHolder.progress}%"
-                          progressHandler.postDelayed(this, 300)
-                      } else if (state != Transformer.PROGRESS_STATE_NOT_STARTED) {
-                          progressHandler.postDelayed(this, 300)
+              private val exportStatusReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      when (intent?.action) {
+                          ExportService.BROADCAST_PROGRESS -> {
+                              val progress = intent.getIntExtra(ExportService.EXTRA_PROGRESS, 0)
+                              binding.progressBar.visibility = View.VISIBLE
+                              binding.progressBar.progress = progress
+                              binding.textStatus.text = "$progress%"
+                          }
+                          ExportService.BROADCAST_COMPLETE -> {
+                              binding.progressBar.visibility = View.GONE
+                              val resultUri = intent.getParcelableExtra<Uri>(ExportService.EXTRA_RESULT_URI)
+                              val outputName = intent.getStringExtra(ExportService.EXTRA_OUTPUT_NAME)
+                              binding.textStatus.text = "Saved to Download/$outputName"
+                              if (resultUri != null) {
+                                  previewVideo(resultUri, "Preview: trimmed result")
+                              }
+                          }
+                          ExportService.BROADCAST_ERROR -> {
+                              binding.progressBar.visibility = View.GONE
+                              val message = intent.getStringExtra(ExportService.EXTRA_ERROR_MESSAGE)
+                              binding.textStatus.text = "Error: $message"
+                          }
                       }
                   }
               }
+
+              private val notificationPermissionLauncher =
+                  registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
               private val pickVideoLauncher =
                   registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -446,6 +460,17 @@ jobs:
                   binding = ActivityMainBinding.inflate(layoutInflater)
                   setContentView(binding.root)
 
+                  ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, insets ->
+                      val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+                      view.setPadding(
+                          systemBars.left + view.paddingLeft,
+                          systemBars.top,
+                          systemBars.right + view.paddingRight,
+                          systemBars.bottom
+                      )
+                      insets
+                  }
+
                   val filter = IntentFilter().apply {
                       addAction(ACTION_PLAY_PAUSE)
                       addAction(ACTION_REWIND)
@@ -457,6 +482,25 @@ jobs:
                       ContextCompat.registerReceiver(this, pipActionReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
                   }
                   pipReceiverRegistered = true
+
+                  val exportFilter = IntentFilter().apply {
+                      addAction(ExportService.BROADCAST_PROGRESS)
+                      addAction(ExportService.BROADCAST_COMPLETE)
+                      addAction(ExportService.BROADCAST_ERROR)
+                  }
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      registerReceiver(exportStatusReceiver, exportFilter, Context.RECEIVER_NOT_EXPORTED)
+                  } else {
+                      ContextCompat.registerReceiver(this, exportStatusReceiver, exportFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
+                  }
+                  exportReceiverRegistered = true
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                      != PackageManager.PERMISSION_GRANTED
+                  ) {
+                      notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                  }
 
                   binding.buttonSelectVideo.setOnClickListener {
                       pickVideoLauncher.launch("video/*")
@@ -519,23 +563,10 @@ jobs:
                   })
                   binding.playerView.player = exoPlayer
                   binding.playerView.visibility = View.VISIBLE
+                  binding.buttonPip.visibility = View.VISIBLE
                   binding.textPlayerLabel.text = label
                   binding.textPlayerLabel.visibility = View.VISIBLE
                   player = exoPlayer
-              }
-
-              private fun saveToDownloads(sourceFile: File, displayName: String): Uri? {
-                  val values = ContentValues().apply {
-                      put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-                      put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-                      put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                  }
-                  val itemUri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                      ?: return null
-                  contentResolver.openOutputStream(itemUri)?.use { out ->
-                      sourceFile.inputStream().use { input -> input.copyTo(out) }
-                  }
-                  return itemUri
               }
 
               private fun processVideo() {
@@ -561,7 +592,164 @@ jobs:
                   val targetBitrate = binding.editBitrate.text.toString().toIntOrNull()
 
                   val outputName = "trimmed_${System.currentTimeMillis()}.mp4"
-                  val outputFile = File(cacheDir, outputName)
+
+                  binding.progressBar.visibility = View.VISIBLE
+                  binding.progressBar.progress = 0
+                  binding.textStatus.text = "0%"
+
+                  val serviceIntent = Intent(this, ExportService::class.java).apply {
+                      action = ExportService.ACTION_START
+                      putExtra(ExportService.EXTRA_URI, uri)
+                      putExtra(ExportService.EXTRA_START_MS, startMs)
+                      putExtra(ExportService.EXTRA_END_MS, endMs)
+                      putExtra(ExportService.EXTRA_WIDTH, targetWidth ?: -1)
+                      putExtra(ExportService.EXTRA_HEIGHT, targetHeight ?: -1)
+                      putExtra(ExportService.EXTRA_BITRATE, targetBitrate ?: -1)
+                      putExtra(ExportService.EXTRA_OUTPUT_NAME, outputName)
+                  }
+                  ContextCompat.startForegroundService(this, serviceIntent)
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  player?.pause()
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  if (pipReceiverRegistered) {
+                      unregisterReceiver(pipActionReceiver)
+                      pipReceiverRegistered = false
+                  }
+                  if (exportReceiverRegistered) {
+                      unregisterReceiver(exportStatusReceiver)
+                      exportReceiverRegistered = false
+                  }
+                  player?.release()
+                  player = null
+              }
+          }
+          MAIN_ACTIVITY
+
+      - name: Write ExportService.kt
+        run: |
+          cat > app/src/main/java/com/example/videotrim/ExportService.kt <<'EXPORT_SERVICE'
+          package com.example.videotrim
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.ContentValues
+          import android.content.Context
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Environment
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.provider.MediaStore
+          import androidx.core.app.NotificationCompat
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MimeTypes
+          import androidx.media3.effect.Presentation
+          import androidx.media3.transformer.Composition
+          import androidx.media3.transformer.DefaultEncoderFactory
+          import androidx.media3.transformer.EditedMediaItem
+          import androidx.media3.transformer.Effects
+          import androidx.media3.transformer.ExportException
+          import androidx.media3.transformer.ExportResult
+          import androidx.media3.transformer.ProgressHolder
+          import androidx.media3.transformer.Transformer
+          import androidx.media3.transformer.VideoEncoderSettings
+          import java.io.File
+
+          class ExportService : Service() {
+
+              companion object {
+                  const val ACTION_START = "com.example.videotrim.action.START_EXPORT"
+                  const val EXTRA_URI = "extra_uri"
+                  const val EXTRA_START_MS = "extra_start_ms"
+                  const val EXTRA_END_MS = "extra_end_ms"
+                  const val EXTRA_WIDTH = "extra_width"
+                  const val EXTRA_HEIGHT = "extra_height"
+                  const val EXTRA_BITRATE = "extra_bitrate"
+                  const val EXTRA_OUTPUT_NAME = "extra_output_name"
+
+                  const val BROADCAST_PROGRESS = "com.example.videotrim.EXPORT_PROGRESS"
+                  const val BROADCAST_COMPLETE = "com.example.videotrim.EXPORT_COMPLETE"
+                  const val BROADCAST_ERROR = "com.example.videotrim.EXPORT_ERROR"
+                  const val EXTRA_PROGRESS = "extra_progress"
+                  const val EXTRA_RESULT_URI = "extra_result_uri"
+                  const val EXTRA_ERROR_MESSAGE = "extra_error_message"
+
+                  private const val CHANNEL_ID = "export_progress"
+                  private const val NOTIFICATION_ID = 42
+              }
+
+              private var transformer: Transformer? = null
+              private val progressHolder = ProgressHolder()
+              private val progressHandler = Handler(Looper.getMainLooper())
+              private lateinit var notificationManager: NotificationManager
+
+              private val progressRunnable = object : Runnable {
+                  override fun run() {
+                      val state = transformer?.getProgress(progressHolder)
+                      if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                          updateNotification(progressHolder.progress)
+                          broadcastProgress(progressHolder.progress)
+                          progressHandler.postDelayed(this, 300)
+                      } else if (state != Transformer.PROGRESS_STATE_NOT_STARTED) {
+                          progressHandler.postDelayed(this, 300)
+                      }
+                  }
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                  createChannel()
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent == null || intent.action != ACTION_START) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+
+                  startForeground(NOTIFICATION_ID, buildProgressNotification(0))
+
+                  val uri = intent.getParcelableExtra<Uri>(EXTRA_URI)
+                  val startMs = intent.getLongExtra(EXTRA_START_MS, 0L)
+                  val endMs = intent.getLongExtra(EXTRA_END_MS, 0L)
+                  val width = intent.getIntExtra(EXTRA_WIDTH, -1).takeIf { it > 0 }
+                  val height = intent.getIntExtra(EXTRA_HEIGHT, -1).takeIf { it > 0 }
+                  val bitrate = intent.getIntExtra(EXTRA_BITRATE, -1).takeIf { it > 0 }
+                  val outputName = intent.getStringExtra(EXTRA_OUTPUT_NAME)
+                      ?: "trimmed_${System.currentTimeMillis()}.mp4"
+
+                  if (uri == null) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+
+                  startExport(uri, startMs, endMs, width, height, bitrate, outputName)
+                  return START_NOT_STICKY
+              }
+
+              private fun startExport(
+                  uri: Uri,
+                  startMs: Long,
+                  endMs: Long,
+                  width: Int?,
+                  height: Int?,
+                  bitrate: Int?,
+                  outputName: String
+              ) {
+                  val file = File(cacheDir, outputName)
 
                   val clippingConfiguration = MediaItem.ClippingConfiguration.Builder()
                       .setStartPositionMs(startMs)
@@ -575,22 +763,16 @@ jobs:
 
                   val editedMediaItemBuilder = EditedMediaItem.Builder(mediaItem)
 
-                  if (targetWidth != null && targetHeight != null) {
+                  if (width != null && height != null) {
                       editedMediaItemBuilder.setEffects(
                           Effects(
                               emptyList(),
-                              listOf(
-                                  Presentation.createForWidthAndHeight(
-                                      targetWidth,
-                                      targetHeight,
-                                      Presentation.LAYOUT_SCALE_TO_FIT
-                                  )
-                              )
+                              listOf(Presentation.createForWidthAndHeight(width, height, Presentation.LAYOUT_SCALE_TO_FIT))
                           )
                       )
-                  } else if (targetHeight != null) {
+                  } else if (height != null) {
                       editedMediaItemBuilder.setEffects(
-                          Effects(emptyList(), listOf(Presentation.createForHeight(targetHeight)))
+                          Effects(emptyList(), listOf(Presentation.createForHeight(height)))
                       )
                   }
 
@@ -599,15 +781,24 @@ jobs:
                       .addListener(object : Transformer.Listener {
                           override fun onCompleted(composition: Composition, result: ExportResult) {
                               progressHandler.removeCallbacks(progressRunnable)
-                              binding.progressBar.visibility = View.GONE
-                              val downloadsUri = saveToDownloads(outputFile, outputName)
-                              outputFile.delete()
+                              val downloadsUri = saveToDownloads(file, outputName)
+                              file.delete()
                               if (downloadsUri != null) {
-                                  binding.textStatus.text = "Saved to Download/$outputName"
-                                  previewVideo(downloadsUri, "Preview: trimmed result")
+                                  notificationManager.notify(
+                                      NOTIFICATION_ID,
+                                      buildFinalNotification("Export complete", "Saved to Download/$outputName")
+                                  )
+                                  broadcastComplete(downloadsUri, outputName)
                               } else {
-                                  binding.textStatus.text = "Export finished but saving to Downloads failed"
+                                  val message = "Saving to Downloads failed"
+                                  notificationManager.notify(
+                                      NOTIFICATION_ID,
+                                      buildFinalNotification("Export finished", message)
+                                  )
+                                  broadcastError(message)
                               }
+                              stopForeground(STOP_FOREGROUND_DETACH)
+                              stopSelf()
                           }
 
                           override fun onError(
@@ -616,50 +807,101 @@ jobs:
                               exception: ExportException
                           ) {
                               progressHandler.removeCallbacks(progressRunnable)
-                              binding.progressBar.visibility = View.GONE
-                              binding.textStatus.text = "Error: ${exception.message}"
+                              val message = exception.message ?: "Unknown error"
+                              notificationManager.notify(NOTIFICATION_ID, buildFinalNotification("Export failed", message))
+                              broadcastError(message)
+                              stopForeground(STOP_FOREGROUND_DETACH)
+                              stopSelf()
                           }
                       })
 
-                  if (targetBitrate != null) {
+                  if (bitrate != null) {
                       transformerBuilder.setEncoderFactory(
                           DefaultEncoderFactory.Builder(applicationContext)
-                              .setRequestedVideoEncoderSettings(
-                                  VideoEncoderSettings.Builder()
-                                      .setBitrate(targetBitrate)
-                                      .build()
-                              )
+                              .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(bitrate).build())
                               .build()
                       )
                   }
 
-                  binding.progressBar.visibility = View.VISIBLE
-                  binding.progressBar.progress = 0
-                  binding.textStatus.text = "0%"
-
                   val newTransformer = transformerBuilder.build()
                   transformer = newTransformer
-                  newTransformer.start(editedMediaItemBuilder.build(), outputFile.absolutePath)
+                  newTransformer.start(editedMediaItemBuilder.build(), file.absolutePath)
                   progressHandler.post(progressRunnable)
               }
 
-              override fun onStop() {
-                  super.onStop()
-                  player?.pause()
+              private fun saveToDownloads(sourceFile: File, displayName: String): Uri? {
+                  val values = ContentValues().apply {
+                      put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                      put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                      put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                  }
+                  val itemUri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                      ?: return null
+                  contentResolver.openOutputStream(itemUri)?.use { out ->
+                      sourceFile.inputStream().use { input -> input.copyTo(out) }
+                  }
+                  return itemUri
+              }
+
+              private fun broadcastProgress(progress: Int) {
+                  sendBroadcast(
+                      Intent(BROADCAST_PROGRESS).setPackage(packageName).putExtra(EXTRA_PROGRESS, progress)
+                  )
+              }
+
+              private fun broadcastComplete(resultUri: Uri, outputName: String) {
+                  sendBroadcast(
+                      Intent(BROADCAST_COMPLETE).setPackage(packageName)
+                          .putExtra(EXTRA_RESULT_URI, resultUri)
+                          .putExtra(EXTRA_OUTPUT_NAME, outputName)
+                  )
+              }
+
+              private fun broadcastError(message: String) {
+                  sendBroadcast(
+                      Intent(BROADCAST_ERROR).setPackage(packageName).putExtra(EXTRA_ERROR_MESSAGE, message)
+                  )
+              }
+
+              private fun createChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(CHANNEL_ID, "Video export", NotificationManager.IMPORTANCE_LOW)
+                      notificationManager.createNotificationChannel(channel)
+                  }
+              }
+
+              private fun buildProgressNotification(progress: Int): Notification {
+                  return NotificationCompat.Builder(this, CHANNEL_ID)
+                      .setContentTitle("Exporting video")
+                      .setContentText("$progress%")
+                      .setSmallIcon(android.R.drawable.stat_sys_download)
+                      .setProgress(100, progress, false)
+                      .setOngoing(true)
+                      .setOnlyAlertOnce(true)
+                      .build()
+              }
+
+              private fun updateNotification(progress: Int) {
+                  notificationManager.notify(NOTIFICATION_ID, buildProgressNotification(progress))
+              }
+
+              private fun buildFinalNotification(title: String, text: String): Notification {
+                  return NotificationCompat.Builder(this, CHANNEL_ID)
+                      .setContentTitle(title)
+                      .setContentText(text)
+                      .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                      .setAutoCancel(true)
+                      .build()
               }
 
               override fun onDestroy() {
                   super.onDestroy()
                   progressHandler.removeCallbacks(progressRunnable)
-                  if (pipReceiverRegistered) {
-                      unregisterReceiver(pipActionReceiver)
-                      pipReceiverRegistered = false
-                  }
-                  player?.release()
-                  player = null
+                  transformer?.cancel()
+                  transformer = null
               }
           }
-          MAIN_ACTIVITY
+          EXPORT_SERVICE
 
       - name: Generate Gradle wrapper
         run: gradle wrapper --gradle-version 8.7
