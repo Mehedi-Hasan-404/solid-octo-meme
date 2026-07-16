@@ -347,7 +347,15 @@ jobs:
 
           import android.content.ContentValues
           import android.net.Uri
+          import android.app.PendingIntent
           import android.app.PictureInPictureParams
+          import android.app.RemoteAction
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.graphics.drawable.Icon
+          import android.os.Build
           import android.os.Bundle
           import android.os.Environment
           import android.os.Handler
@@ -357,8 +365,10 @@ jobs:
           import android.widget.Toast
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.content.ContextCompat
           import androidx.media3.common.MediaItem
           import androidx.media3.common.MimeTypes
+          import androidx.media3.common.Player
           import androidx.media3.effect.Presentation
           import androidx.media3.exoplayer.ExoPlayer
           import androidx.media3.transformer.Composition
@@ -375,12 +385,39 @@ jobs:
 
           class MainActivity : AppCompatActivity() {
 
+              companion object {
+                  private const val ACTION_PLAY_PAUSE = "com.example.videotrim.PIP_PLAY_PAUSE"
+                  private const val ACTION_REWIND = "com.example.videotrim.PIP_REWIND"
+                  private const val ACTION_FORWARD = "com.example.videotrim.PIP_FORWARD"
+                  private const val SEEK_MS = 10000L
+                  private const val REQUEST_PLAY_PAUSE = 1
+                  private const val REQUEST_REWIND = 2
+                  private const val REQUEST_FORWARD = 3
+              }
+
               private lateinit var binding: ActivityMainBinding
               private var selectedUri: Uri? = null
               private var player: ExoPlayer? = null
               private var transformer: Transformer? = null
+              private var pipReceiverRegistered = false
               private val progressHolder = ProgressHolder()
               private val progressHandler = Handler(Looper.getMainLooper())
+
+              private val pipActionReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      val currentPlayer = player ?: return
+                      when (intent?.action) {
+                          ACTION_PLAY_PAUSE -> currentPlayer.playWhenReady = !currentPlayer.playWhenReady
+                          ACTION_REWIND -> currentPlayer.seekTo(
+                              (currentPlayer.currentPosition - SEEK_MS).coerceAtLeast(0)
+                          )
+                          ACTION_FORWARD -> currentPlayer.seekTo(
+                              (currentPlayer.currentPosition + SEEK_MS).coerceAtMost(currentPlayer.duration.coerceAtLeast(0))
+                          )
+                      }
+                      updatePipActions()
+                  }
+              }
 
               private val progressRunnable = object : Runnable {
                   override fun run() {
@@ -409,6 +446,18 @@ jobs:
                   binding = ActivityMainBinding.inflate(layoutInflater)
                   setContentView(binding.root)
 
+                  val filter = IntentFilter().apply {
+                      addAction(ACTION_PLAY_PAUSE)
+                      addAction(ACTION_REWIND)
+                      addAction(ACTION_FORWARD)
+                  }
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      registerReceiver(pipActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                  } else {
+                      ContextCompat.registerReceiver(this, pipActionReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+                  }
+                  pipReceiverRegistered = true
+
                   binding.buttonSelectVideo.setOnClickListener {
                       pickVideoLauncher.launch("video/*")
                   }
@@ -426,7 +475,35 @@ jobs:
                   }
 
                   binding.buttonPip.setOnClickListener {
-                      enterPictureInPictureMode(PictureInPictureParams.Builder().build())
+                      enterPictureInPictureMode(buildPipParams())
+                  }
+              }
+
+              private fun pipRemoteAction(iconResId: Int, title: String, action: String, requestCode: Int): RemoteAction {
+                  val intent = Intent(action).setPackage(packageName)
+                  val pendingIntent = PendingIntent.getBroadcast(
+                      this,
+                      requestCode,
+                      intent,
+                      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                  )
+                  return RemoteAction(Icon.createWithResource(this, iconResId), title, title, pendingIntent)
+              }
+
+              private fun buildPipParams(): PictureInPictureParams {
+                  val isPlaying = player?.playWhenReady == true
+                  val playPauseIcon = if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+                  val actions = listOf(
+                      pipRemoteAction(android.R.drawable.ic_media_rew, "Rewind", ACTION_REWIND, REQUEST_REWIND),
+                      pipRemoteAction(playPauseIcon, "Play/Pause", ACTION_PLAY_PAUSE, REQUEST_PLAY_PAUSE),
+                      pipRemoteAction(android.R.drawable.ic_media_ff, "Forward", ACTION_FORWARD, REQUEST_FORWARD)
+                  )
+                  return PictureInPictureParams.Builder().setActions(actions).build()
+              }
+
+              private fun updatePipActions() {
+                  if (isInPictureInPictureMode) {
+                      setPictureInPictureParams(buildPipParams())
                   }
               }
 
@@ -435,6 +512,11 @@ jobs:
                   val exoPlayer = ExoPlayer.Builder(this).build()
                   exoPlayer.setMediaItem(MediaItem.fromUri(uri))
                   exoPlayer.prepare()
+                  exoPlayer.addListener(object : Player.Listener {
+                      override fun onIsPlayingChanged(isPlaying: Boolean) {
+                          updatePipActions()
+                      }
+                  })
                   binding.playerView.player = exoPlayer
                   binding.playerView.visibility = View.VISIBLE
                   binding.textPlayerLabel.text = label
@@ -569,6 +651,10 @@ jobs:
               override fun onDestroy() {
                   super.onDestroy()
                   progressHandler.removeCallbacks(progressRunnable)
+                  if (pipReceiverRegistered) {
+                      unregisterReceiver(pipActionReceiver)
+                      pipReceiverRegistered = false
+                  }
                   player?.release()
                   player = null
               }
