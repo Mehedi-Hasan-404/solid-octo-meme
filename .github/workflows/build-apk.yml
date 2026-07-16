@@ -92,7 +92,7 @@ jobs:
 
               defaultConfig {
                   applicationId "com.example.videotrim"
-                  minSdk 24
+                  minSdk 29
                   targetSdk 34
                   versionCode 1
                   versionName "1.0"
@@ -135,6 +135,10 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
               <application
                   android:allowBackup="true"
                   android:icon="@android:drawable/sym_def_app_icon"
@@ -143,12 +147,20 @@ jobs:
 
                   <activity
                       android:name=".MainActivity"
-                      android:exported="true">
+                      android:exported="true"
+                      android:supportsPictureInPicture="true"
+                      android:resizeableActivity="true"
+                      android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+
+                  <service
+                      android:name=".ExportService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProcessing" />
               </application>
           </manifest>
           ANDROID_MANIFEST
@@ -184,26 +196,46 @@ jobs:
                   android:orientation="vertical"
                   android:padding="16dp">
 
-                  <Button
-                      android:id="@+id/buttonSelectVideo"
+                  <LinearLayout
+                      android:id="@+id/topControls"
                       android:layout_width="match_parent"
                       android:layout_height="wrap_content"
-                      android:text="Select Video" />
+                      android:orientation="vertical">
+
+                      <Button
+                          android:id="@+id/buttonSelectVideo"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:text="Select Video" />
+
+                      <TextView
+                          android:id="@+id/textSelectedFile"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="8dp"
+                          android:text="No video selected" />
+                  </LinearLayout>
 
                   <TextView
-                      android:id="@+id/textSelectedFile"
+                      android:id="@+id/textPlayerLabel"
                       android:layout_width="match_parent"
                       android:layout_height="wrap_content"
                       android:layout_marginTop="8dp"
-                      android:text="No video selected" />
+                      android:visibility="gone" />
 
                   <androidx.media3.ui.PlayerView
                       android:id="@+id/playerView"
                       android:layout_width="match_parent"
                       android:layout_height="220dp"
-                      android:layout_marginTop="8dp"
+                      android:layout_marginTop="4dp"
                       android:visibility="gone"
                       app:use_controller="true" />
+
+                  <LinearLayout
+                      android:id="@+id/bottomControls"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:orientation="vertical">
 
                   <LinearLayout
                       android:layout_width="match_parent"
@@ -280,6 +312,13 @@ jobs:
                       android:layout_marginTop="16dp"
                       android:text="Cut and Export" />
 
+                  <Button
+                      android:id="@+id/buttonPip"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp"
+                      android:text="Picture in Picture" />
+
                   <ProgressBar
                       android:id="@+id/progressBar"
                       style="@android:style/Widget.ProgressBar.Horizontal"
@@ -295,6 +334,8 @@ jobs:
                       android:layout_height="wrap_content"
                       android:layout_marginTop="16dp" />
 
+                  </LinearLayout>
+
               </LinearLayout>
           </ScrollView>
           ACTIVITY_MAIN_XML
@@ -304,11 +345,13 @@ jobs:
           cat > app/src/main/java/com/example/videotrim/MainActivity.kt <<'MAIN_ACTIVITY'
           package com.example.videotrim
 
+          import android.content.ContentValues
           import android.net.Uri
           import android.os.Bundle
           import android.os.Environment
           import android.os.Handler
           import android.os.Looper
+          import android.provider.MediaStore
           import android.view.View
           import android.widget.Toast
           import androidx.activity.result.contract.ActivityResultContracts
@@ -356,7 +399,7 @@ jobs:
                       if (uri != null) {
                           selectedUri = uri
                           binding.textSelectedFile.text = uri.toString()
-                          previewVideo(uri)
+                          previewVideo(uri, "Preview: original")
                       }
                   }
 
@@ -382,14 +425,30 @@ jobs:
                   }
               }
 
-              private fun previewVideo(uri: Uri) {
+              private fun previewVideo(uri: Uri, label: String) {
                   player?.release()
                   val exoPlayer = ExoPlayer.Builder(this).build()
                   exoPlayer.setMediaItem(MediaItem.fromUri(uri))
                   exoPlayer.prepare()
                   binding.playerView.player = exoPlayer
                   binding.playerView.visibility = View.VISIBLE
+                  binding.textPlayerLabel.text = label
+                  binding.textPlayerLabel.visibility = View.VISIBLE
                   player = exoPlayer
+              }
+
+              private fun saveToDownloads(sourceFile: File, displayName: String): Uri? {
+                  val values = ContentValues().apply {
+                      put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                      put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                      put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                  }
+                  val itemUri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                      ?: return null
+                  contentResolver.openOutputStream(itemUri)?.use { out ->
+                      sourceFile.inputStream().use { input -> input.copyTo(out) }
+                  }
+                  return itemUri
               }
 
               private fun processVideo() {
@@ -414,8 +473,8 @@ jobs:
                   val targetWidth = binding.editWidth.text.toString().toIntOrNull()
                   val targetBitrate = binding.editBitrate.text.toString().toIntOrNull()
 
-                  val outputDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-                  val outputFile = File(outputDir, "trimmed_${System.currentTimeMillis()}.mp4")
+                  val outputName = "trimmed_${System.currentTimeMillis()}.mp4"
+                  val outputFile = File(cacheDir, outputName)
 
                   val clippingConfiguration = MediaItem.ClippingConfiguration.Builder()
                       .setStartPositionMs(startMs)
@@ -454,8 +513,14 @@ jobs:
                           override fun onCompleted(composition: Composition, result: ExportResult) {
                               progressHandler.removeCallbacks(progressRunnable)
                               binding.progressBar.visibility = View.GONE
-                              binding.textStatus.text = "Saved to ${outputFile.absolutePath}"
-                              previewVideo(Uri.fromFile(outputFile))
+                              val downloadsUri = saveToDownloads(outputFile, outputName)
+                              outputFile.delete()
+                              if (downloadsUri != null) {
+                                  binding.textStatus.text = "Saved to Download/$outputName"
+                                  previewVideo(downloadsUri, "Preview: trimmed result")
+                              } else {
+                                  binding.textStatus.text = "Export finished but saving to Downloads failed"
+                              }
                           }
 
                           override fun onError(
