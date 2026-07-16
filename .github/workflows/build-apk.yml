@@ -1,0 +1,413 @@
+name: Build Video Trim APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Create project structure
+        run: |
+          mkdir -p app/src/main/java/com/example/videotrim
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+
+      - name: Write settings.gradle
+        run: |
+          cat > settings.gradle <<'SETTINGS_GRADLE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = "VideoTrim"
+          include ':app'
+          SETTINGS_GRADLE
+
+      - name: Write root build.gradle
+        run: |
+          cat > build.gradle <<'ROOT_BUILD_GRADLE'
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.5.2'
+                  classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24'
+              }
+          }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          ROOT_BUILD_GRADLE
+
+      - name: Write gradle.properties
+        run: |
+          cat > gradle.properties <<'GRADLE_PROPERTIES'
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          org.gradle.jvmargs=-Xmx2048m
+          GRADLE_PROPERTIES
+
+      - name: Write local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Write app build.gradle
+        run: |
+          cat > app/build.gradle <<'APP_BUILD_GRADLE'
+          apply plugin: 'com.android.application'
+          apply plugin: 'kotlin-android'
+
+          android {
+              namespace 'com.example.videotrim'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.example.videotrim"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  debug {}
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              buildFeatures {
+                  viewBinding true
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.13.1'
+              implementation 'androidx.appcompat:appcompat:1.7.0'
+              implementation 'com.google.android.material:material:1.12.0'
+              implementation 'androidx.activity:activity-ktx:1.9.0'
+              implementation 'androidx.media3:media3-transformer:1.4.1'
+              implementation 'androidx.media3:media3-common:1.4.1'
+              implementation 'androidx.media3:media3-effect:1.4.1'
+          }
+          APP_BUILD_GRADLE
+
+      - name: Write AndroidManifest.xml
+        run: |
+          cat > app/src/main/AndroidManifest.xml <<'ANDROID_MANIFEST'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="@string/app_name"
+                  android:theme="@style/Theme.VideoTrim">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          ANDROID_MANIFEST
+
+      - name: Write strings.xml
+        run: |
+          cat > app/src/main/res/values/strings.xml <<'STRINGS_XML'
+          <resources>
+              <string name="app_name">Video Trim</string>
+          </resources>
+          STRINGS_XML
+
+      - name: Write themes.xml
+        run: |
+          cat > app/src/main/res/values/themes.xml <<'THEMES_XML'
+          <resources>
+              <style name="Theme.VideoTrim" parent="Theme.Material3.DayNight.NoActionBar" />
+          </resources>
+          THEMES_XML
+
+      - name: Write activity_main.xml
+        run: |
+          cat > app/src/main/res/layout/activity_main.xml <<'ACTIVITY_MAIN_XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="16dp">
+
+              <Button
+                  android:id="@+id/buttonSelectVideo"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="Select Video" />
+
+              <TextView
+                  android:id="@+id/textSelectedFile"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="8dp"
+                  android:text="No video selected" />
+
+              <EditText
+                  android:id="@+id/editStart"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="16dp"
+                  android:hint="Start time in seconds"
+                  android:inputType="numberDecimal" />
+
+              <EditText
+                  android:id="@+id/editEnd"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="8dp"
+                  android:hint="End time in seconds"
+                  android:inputType="numberDecimal" />
+
+              <RadioGroup
+                  android:id="@+id/radioGroupQuality"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="16dp"
+                  android:orientation="horizontal">
+
+                  <RadioButton
+                      android:id="@+id/radioHigh"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:checked="true"
+                      android:text="High" />
+
+                  <RadioButton
+                      android:id="@+id/radioMedium"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:layout_marginStart="16dp"
+                      android:text="Medium" />
+
+                  <RadioButton
+                      android:id="@+id/radioLow"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:layout_marginStart="16dp"
+                      android:text="Low" />
+              </RadioGroup>
+
+              <Button
+                  android:id="@+id/buttonProcess"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="16dp"
+                  android:text="Cut and Export" />
+
+              <ProgressBar
+                  android:id="@+id/progressBar"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="16dp"
+                  android:layout_gravity="center"
+                  android:visibility="gone" />
+
+              <TextView
+                  android:id="@+id/textStatus"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="16dp" />
+
+          </LinearLayout>
+          ACTIVITY_MAIN_XML
+
+      - name: Write MainActivity.kt
+        run: |
+          cat > app/src/main/java/com/example/videotrim/MainActivity.kt <<'MAIN_ACTIVITY'
+          package com.example.videotrim
+
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Environment
+          import android.view.View
+          import android.widget.Toast
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MimeTypes
+          import androidx.media3.effect.Presentation
+          import androidx.media3.transformer.Composition
+          import androidx.media3.transformer.DefaultEncoderFactory
+          import androidx.media3.transformer.EditedMediaItem
+          import androidx.media3.transformer.Effects
+          import androidx.media3.transformer.ExportException
+          import androidx.media3.transformer.ExportResult
+          import androidx.media3.transformer.Transformer
+          import androidx.media3.transformer.VideoEncoderSettings
+          import com.example.videotrim.databinding.ActivityMainBinding
+          import java.io.File
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var binding: ActivityMainBinding
+              private var selectedUri: Uri? = null
+
+              private val pickVideoLauncher =
+                  registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+                      if (uri != null) {
+                          selectedUri = uri
+                          binding.textSelectedFile.text = uri.toString()
+                      }
+                  }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  binding = ActivityMainBinding.inflate(layoutInflater)
+                  setContentView(binding.root)
+
+                  binding.buttonSelectVideo.setOnClickListener {
+                      pickVideoLauncher.launch("video/*")
+                  }
+
+                  binding.buttonProcess.setOnClickListener {
+                      processVideo()
+                  }
+              }
+
+              private fun processVideo() {
+                  val uri = selectedUri
+                  if (uri == null) {
+                      Toast.makeText(this, "Select a video first", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+
+                  val startSeconds = binding.editStart.text.toString().toDoubleOrNull()
+                  val endSeconds = binding.editEnd.text.toString().toDoubleOrNull()
+
+                  if (startSeconds == null || endSeconds == null || endSeconds <= startSeconds) {
+                      Toast.makeText(this, "Enter a valid start and end time", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+
+                  val startMs = (startSeconds * 1000).toLong()
+                  val endMs = (endSeconds * 1000).toLong()
+
+                  val targetHeight = when (binding.radioGroupQuality.checkedRadioButtonId) {
+                      binding.radioMedium.id -> 720
+                      binding.radioLow.id -> 480
+                      else -> null
+                  }
+
+                  val targetBitrate = when (binding.radioGroupQuality.checkedRadioButtonId) {
+                      binding.radioMedium.id -> 4_000_000
+                      binding.radioLow.id -> 1_500_000
+                      else -> null
+                  }
+
+                  val outputDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+                  val outputFile = File(outputDir, "trimmed_${System.currentTimeMillis()}.mp4")
+
+                  val clippingConfiguration = MediaItem.ClippingConfiguration.Builder()
+                      .setStartPositionMs(startMs)
+                      .setEndPositionMs(endMs)
+                      .build()
+
+                  val mediaItem = MediaItem.Builder()
+                      .setUri(uri)
+                      .setClippingConfiguration(clippingConfiguration)
+                      .build()
+
+                  val editedMediaItemBuilder = EditedMediaItem.Builder(mediaItem)
+
+                  if (targetHeight != null) {
+                      editedMediaItemBuilder.setEffects(
+                          Effects(emptyList(), listOf(Presentation.createForHeight(targetHeight)))
+                      )
+                  }
+
+                  val transformerBuilder = Transformer.Builder(this)
+                      .setVideoMimeType(MimeTypes.VIDEO_H264)
+                      .addListener(object : Transformer.Listener {
+                          override fun onCompleted(composition: Composition, result: ExportResult) {
+                              binding.progressBar.visibility = View.GONE
+                              binding.textStatus.text = "Saved to ${outputFile.absolutePath}"
+                          }
+
+                          override fun onError(
+                              composition: Composition,
+                              result: ExportResult,
+                              exception: ExportException
+                          ) {
+                              binding.progressBar.visibility = View.GONE
+                              binding.textStatus.text = "Error: ${exception.message}"
+                          }
+                      })
+
+                  if (targetBitrate != null) {
+                      transformerBuilder.setEncoderFactory(
+                          DefaultEncoderFactory.Builder(applicationContext)
+                              .setRequestedVideoEncoderSettings(
+                                  VideoEncoderSettings.Builder()
+                                      .setBitrate(targetBitrate)
+                                      .build()
+                              )
+                              .build()
+                      )
+                  }
+
+                  binding.progressBar.visibility = View.VISIBLE
+                  binding.textStatus.text = ""
+
+                  transformerBuilder.build().start(editedMediaItemBuilder.build(), outputFile.absolutePath)
+              }
+          }
+          MAIN_ACTIVITY
+
+      - name: Generate Gradle wrapper
+        run: gradle wrapper --gradle-version 8.7
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video-trim-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
