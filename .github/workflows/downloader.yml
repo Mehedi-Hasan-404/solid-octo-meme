@@ -144,6 +144,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
               <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
               <application
                   android:allowBackup="true"
@@ -314,7 +315,6 @@ jobs:
           import androidx.media3.exoplayer.ExoPlayer
           import com.example.m3u8downloader.databinding.ActivityMainBinding
           import kotlinx.coroutines.launch
-          import java.io.File
 
           class MainActivity : AppCompatActivity() {
 
@@ -331,6 +331,11 @@ jobs:
               private val batteryOptimizationLauncher =
                   registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
                       requestNotificationPermissionAndStart()
+                  }
+
+              private val storagePermissionLauncher =
+                  registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+                      startDownload()
                   }
 
               override fun onCreate(savedInstanceState: Bundle?) {
@@ -396,8 +401,19 @@ jobs:
                       ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                       != PackageManager.PERMISSION_GRANTED
                   ) {
-                      pendingStart = { startDownload() }
+                      pendingStart = { requestStoragePermissionAndStart() }
                       notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                  } else {
+                      requestStoragePermissionAndStart()
+                  }
+              }
+
+              private fun requestStoragePermissionAndStart() {
+                  if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                      != PackageManager.PERMISSION_GRANTED
+                  ) {
+                      storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                   } else {
                       startDownload()
                   }
@@ -479,8 +495,8 @@ jobs:
 
                                   is DownloadState.Completed -> {
                                       setIdleUiState()
-                                      binding.textStatus.text = "Saved to ${state.path}"
-                                      previewVideo(Uri.fromFile(File(state.path)))
+                                      binding.textStatus.text = "Saved to Downloads/${state.displayName}"
+                                      previewVideo(Uri.parse(state.path))
                                   }
 
                                   is DownloadState.Cancelled -> {
@@ -531,8 +547,10 @@ jobs:
           import android.app.NotificationManager
           import android.app.PendingIntent
           import android.app.Service
+          import android.content.ContentValues
           import android.content.Intent
           import android.content.pm.ServiceInfo
+          import android.media.MediaScannerConnection
           import android.net.Uri
           import android.os.Build
           import android.os.Environment
@@ -540,6 +558,7 @@ jobs:
           import android.os.IBinder
           import android.os.Looper
           import android.os.PowerManager
+          import android.provider.MediaStore
           import androidx.core.app.NotificationCompat
           import androidx.media3.common.MediaItem
           import androidx.media3.common.MimeTypes
@@ -586,7 +605,7 @@ jobs:
               data class FetchingPlaylist(val message: String = "Fetching playlist...", val retryAttempt: Int = 0) : DownloadState()
               data class Downloading(val done: Int, val total: Int, val retryAttempt: Int = 0) : DownloadState()
               data class Converting(val percent: Int) : DownloadState()
-              data class Completed(val path: String) : DownloadState()
+              data class Completed(val path: String, val displayName: String) : DownloadState()
               object Cancelled : DownloadState()
               data class Failed(val message: String) : DownloadState()
           }
@@ -1036,10 +1055,30 @@ jobs:
                               // isRunning is false; don't clobber the Cancelled state.
                               if (!isRunning) return
                               tsFile.delete()
-                              _state.value = DownloadState.Completed(mp4File.absolutePath)
-                              getSystemService(NotificationManager::class.java)
-                                  .notify(NOTIFICATION_ID, buildFinalNotification("Saved ${mp4File.name}"))
-                              finishService()
+                              serviceScope.launch {
+                                  val downloadsUri = try {
+                                      withContext(Dispatchers.IO) {
+                                          val uri = saveToDownloads(mp4File, mp4File.name)
+                                          mp4File.delete()
+                                          uri
+                                      }
+                                  } catch (e: Exception) {
+                                      null
+                                  }
+                                  withContext(Dispatchers.Main) {
+                                      if (!isRunning) return@withContext
+                                      if (downloadsUri != null) {
+                                          _state.value = DownloadState.Completed(downloadsUri.toString(), mp4File.name)
+                                          getSystemService(NotificationManager::class.java)
+                                              .notify(NOTIFICATION_ID, buildFinalNotification("Saved ${mp4File.name} to Downloads"))
+                                      } else {
+                                          _state.value = DownloadState.Failed("Converted but couldn't save to Downloads")
+                                          getSystemService(NotificationManager::class.java)
+                                              .notify(NOTIFICATION_ID, buildFinalNotification("Failed to save ${mp4File.name} to Downloads"))
+                                      }
+                                      finishService()
+                                  }
+                              }
                           }
 
                           override fun onError(
@@ -1059,6 +1098,30 @@ jobs:
                   transformer = newTransformer
                   newTransformer.start(editedMediaItem, mp4File.absolutePath)
                   progressHandler.post(progressRunnable)
+              }
+
+              private fun saveToDownloads(sourceFile: File, displayName: String): Uri? {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      val values = ContentValues().apply {
+                          put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                          put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                          put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                      }
+                      val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+                      contentResolver.openOutputStream(uri)?.use { out ->
+                          sourceFile.inputStream().use { it.copyTo(out) }
+                      } ?: return null
+                      return uri
+                  } else {
+                      val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                      if (!downloadsDir.exists()) downloadsDir.mkdirs()
+                      val destFile = File(downloadsDir, displayName)
+                      sourceFile.inputStream().use { input ->
+                          destFile.outputStream().use { output -> input.copyTo(output) }
+                      }
+                      MediaScannerConnection.scanFile(this, arrayOf(destFile.absolutePath), arrayOf("video/mp4"), null)
+                      return Uri.fromFile(destFile)
+                  }
               }
 
               override fun onDestroy() {
