@@ -383,8 +383,13 @@ jobs:
                   )
 
                   binding.buttonSelectFile.setOnClickListener {
-                      val mimeTypes = inputFormats[binding.spinnerInputFormat.selectedItemPosition].second
-                      filePickerLauncher.launch(mimeTypes)
+                      // Always request all file types instead of filtering by the spinner's MIME
+                      // types. Many document providers (download managers, HLS downloader apps,
+                      // etc.) report files with no extension or the wrong MIME type, which causes
+                      // ACTION_OPEN_DOCUMENT to grey them out even when they're valid videos. The
+                      // spinner selection is still used later to decide how to treat the file; it
+                      // no longer restricts what's selectable in the picker.
+                      filePickerLauncher.launch(arrayOf("*/*"))
                   }
 
                   binding.buttonConvert.setOnClickListener {
