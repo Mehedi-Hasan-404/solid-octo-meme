@@ -143,9 +143,11 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
               <application
                   android:allowBackup="true"
+                  android:largeHeap="true"
                   android:icon="@android:drawable/sym_def_app_icon"
                   android:label="@string/app_name"
                   android:theme="@style/Theme.M3U8Downloader">
@@ -298,6 +300,8 @@ jobs:
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
+          import android.os.PowerManager
+          import android.provider.Settings
           import android.view.View
           import android.widget.Toast
           import androidx.activity.result.contract.ActivityResultContracts
@@ -322,6 +326,11 @@ jobs:
                   registerForActivityResult(ActivityResultContracts.RequestPermission()) {
                       pendingStart?.invoke()
                       pendingStart = null
+                  }
+
+              private val batteryOptimizationLauncher =
+                  registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+                      requestNotificationPermissionAndStart()
                   }
 
               override fun onCreate(savedInstanceState: Bundle?) {
@@ -363,6 +372,26 @@ jobs:
               }
 
               private fun requestPermissionAndStart() {
+                  requestBatteryOptimizationExemption()
+              }
+
+              private fun requestBatteryOptimizationExemption() {
+                  val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+                  if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                      val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                          data = Uri.parse("package:$packageName")
+                      }
+                      try {
+                          batteryOptimizationLauncher.launch(intent)
+                      } catch (e: Exception) {
+                          requestNotificationPermissionAndStart()
+                      }
+                  } else {
+                      requestNotificationPermissionAndStart()
+                  }
+              }
+
+              private fun requestNotificationPermissionAndStart() {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                       ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                       != PackageManager.PERMISSION_GRANTED
@@ -667,9 +696,14 @@ jobs:
                               }
                           } catch (e: CancellationException) {
                               // Cancellation is already handled synchronously by cancelDownload().
-                          } catch (e: Exception) {
-                              _state.value = DownloadState.Failed(e.message ?: "Unknown error")
-                              updateNotification("Failed: ${e.message}", 0, false)
+                          } catch (e: Throwable) {
+                              val message = if (e is OutOfMemoryError) {
+                                  "Out of memory — try a lower quality source or free up device memory"
+                              } else {
+                                  e.message ?: "Unknown error"
+                              }
+                              _state.value = DownloadState.Failed(message)
+                              updateNotification("Failed: $message", 0, false)
                               finishService()
                           }
                       }
@@ -948,31 +982,42 @@ jobs:
                   val segments = parseSegments(mediaContent, mediaUrl)
                   if (segments.isEmpty()) throw IllegalStateException("No segments found in playlist")
 
-                  val results = arrayOfNulls<ByteArray>(segments.size)
+                  val partsDir = File(outputTsFile.parentFile, "${outputTsFile.nameWithoutExtension}_parts")
+                  partsDir.mkdirs()
                   val keyCache = mutableMapOf<String, ByteArray>()
                   val keyCacheMutex = Mutex()
                   val semaphore = Semaphore(6)
                   val completed = AtomicInteger(0)
 
-                  coroutineScope {
-                      val jobs = segments.mapIndexed { index, segment ->
-                          async {
-                              semaphore.withPermit {
-                                  val raw = retryIndefinitely(onRetry = { attempt, _ ->
-                                      onProgress(completed.get(), segments.size, attempt)
-                                  }) {
-                                      fetchBytes(segment.url, referer, origin, cookie, userAgent)
+                  try {
+                      coroutineScope {
+                          val jobs = segments.mapIndexed { index, segment ->
+                              async {
+                                  semaphore.withPermit {
+                                      val raw = retryIndefinitely(onRetry = { attempt, _ ->
+                                          onProgress(completed.get(), segments.size, attempt)
+                                      }) {
+                                          fetchBytes(segment.url, referer, origin, cookie, userAgent)
+                                      }
+                                      val decrypted = decrypt(raw, segment, keyCache, keyCacheMutex, referer, origin, cookie, userAgent)
+                                      File(partsDir, "%06d.part".format(index)).writeBytes(decrypted)
+                                      onProgress(completed.incrementAndGet(), segments.size, 0)
                                   }
-                                  results[index] = decrypt(raw, segment, keyCache, keyCacheMutex, referer, origin, cookie, userAgent)
-                                  onProgress(completed.incrementAndGet(), segments.size, 0)
                               }
                           }
+                          jobs.forEach { it.await() }
                       }
-                      jobs.forEach { it.await() }
-                  }
 
-                  RandomAccessFile(outputTsFile, "rw").use { raf ->
-                      for (chunk in results) raf.write(chunk ?: throw IllegalStateException("Missing segment data"))
+                      RandomAccessFile(outputTsFile, "rw").use { raf ->
+                          for (index in segments.indices) {
+                              val part = File(partsDir, "%06d.part".format(index))
+                              if (!part.exists()) throw IllegalStateException("Missing segment data")
+                              raf.write(part.readBytes())
+                              part.delete()
+                          }
+                      }
+                  } finally {
+                      partsDir.deleteRecursively()
                   }
 
                   return segments.size
