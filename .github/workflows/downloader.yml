@@ -252,6 +252,14 @@ jobs:
                       android:layout_marginTop="16dp"
                       android:text="Download and Convert" />
 
+                  <Button
+                      android:id="@+id/buttonCancel"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp"
+                      android:text="Cancel"
+                      android:visibility="gone" />
+
                   <ProgressBar
                       android:id="@+id/progressBar"
                       style="@android:style/Widget.ProgressBar.Horizontal"
@@ -325,7 +333,33 @@ jobs:
                       requestPermissionAndStart()
                   }
 
+                  binding.buttonCancel.setOnClickListener {
+                      cancelDownload()
+                  }
+
                   observeDownloadState()
+              }
+
+              private fun cancelDownload() {
+                  binding.buttonCancel.isEnabled = false
+                  binding.textStatus.text = "Cancelling..."
+                  val intent = Intent(this, DownloadService::class.java).apply {
+                      action = DownloadService.ACTION_CANCEL
+                  }
+                  startService(intent)
+              }
+
+              private fun setActiveUiState() {
+                  binding.progressBar.visibility = View.VISIBLE
+                  binding.buttonDownload.isEnabled = false
+                  binding.buttonCancel.visibility = View.VISIBLE
+                  binding.buttonCancel.isEnabled = true
+              }
+
+              private fun setIdleUiState() {
+                  binding.progressBar.visibility = View.GONE
+                  binding.buttonDownload.isEnabled = true
+                  binding.buttonCancel.visibility = View.GONE
               }
 
               private fun requestPermissionAndStart() {
@@ -361,11 +395,10 @@ jobs:
                       "m3u8_${System.currentTimeMillis()}"
                   }.replace(Regex("[^A-Za-z0-9_-]"), "_")
 
-                  binding.progressBar.visibility = View.VISIBLE
+                  setActiveUiState()
                   binding.progressBar.progress = 0
                   binding.playerView.visibility = View.GONE
                   binding.textStatus.text = "Starting background download..."
-                  binding.buttonDownload.isEnabled = false
 
                   val intent = Intent(this, DownloadService::class.java).apply {
                       action = DownloadService.ACTION_START
@@ -390,36 +423,44 @@ jobs:
                                   is DownloadState.Idle -> Unit
 
                                   is DownloadState.FetchingPlaylist -> {
-                                      binding.progressBar.visibility = View.VISIBLE
-                                      binding.buttonDownload.isEnabled = false
-                                      binding.textStatus.text = state.message
+                                      setActiveUiState()
+                                      binding.textStatus.text = if (state.retryAttempt > 0) {
+                                          "${state.message} (retry #${state.retryAttempt})"
+                                      } else {
+                                          state.message
+                                      }
                                   }
 
                                   is DownloadState.Downloading -> {
-                                      binding.progressBar.visibility = View.VISIBLE
-                                      binding.buttonDownload.isEnabled = false
+                                      setActiveUiState()
                                       binding.progressBar.progress =
                                           if (state.total > 0) state.done * 100 / state.total else 0
-                                      binding.textStatus.text = "Downloaded ${state.done}/${state.total} segments"
+                                      binding.textStatus.text = if (state.retryAttempt > 0) {
+                                          "Downloaded ${state.done}/${state.total} segments (retry #${state.retryAttempt})"
+                                      } else {
+                                          "Downloaded ${state.done}/${state.total} segments"
+                                      }
                                   }
 
                                   is DownloadState.Converting -> {
-                                      binding.progressBar.visibility = View.VISIBLE
-                                      binding.buttonDownload.isEnabled = false
+                                      setActiveUiState()
                                       binding.progressBar.progress = state.percent
                                       binding.textStatus.text = "Converting: ${state.percent}%"
                                   }
 
                                   is DownloadState.Completed -> {
-                                      binding.progressBar.visibility = View.GONE
-                                      binding.buttonDownload.isEnabled = true
+                                      setIdleUiState()
                                       binding.textStatus.text = "Saved to ${state.path}"
                                       previewVideo(Uri.fromFile(File(state.path)))
                                   }
 
+                                  is DownloadState.Cancelled -> {
+                                      setIdleUiState()
+                                      binding.textStatus.text = "Download cancelled"
+                                  }
+
                                   is DownloadState.Failed -> {
-                                      binding.progressBar.visibility = View.GONE
-                                      binding.buttonDownload.isEnabled = true
+                                      setIdleUiState()
                                       binding.textStatus.text = "Failed: ${state.message}"
                                   }
                               }
@@ -479,16 +520,21 @@ jobs:
           import androidx.media3.transformer.ExportResult
           import androidx.media3.transformer.ProgressHolder
           import androidx.media3.transformer.Transformer
+          import kotlinx.coroutines.CancellationException
           import kotlinx.coroutines.CoroutineScope
           import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.Job
           import kotlinx.coroutines.SupervisorJob
           import kotlinx.coroutines.async
           import kotlinx.coroutines.coroutineScope
+          import kotlinx.coroutines.delay
           import kotlinx.coroutines.flow.MutableStateFlow
           import kotlinx.coroutines.flow.StateFlow
           import kotlinx.coroutines.flow.asStateFlow
           import kotlinx.coroutines.launch
+          import kotlinx.coroutines.sync.Mutex
           import kotlinx.coroutines.sync.Semaphore
+          import kotlinx.coroutines.sync.withLock
           import kotlinx.coroutines.sync.withPermit
           import kotlinx.coroutines.withContext
           import java.io.File
@@ -497,6 +543,7 @@ jobs:
           import java.net.URI
           import java.net.URL
           import java.security.MessageDigest
+          import java.util.Collections
           import java.util.concurrent.atomic.AtomicInteger
           import javax.crypto.Cipher
           import javax.crypto.spec.IvParameterSpec
@@ -507,10 +554,11 @@ jobs:
 
           sealed class DownloadState {
               object Idle : DownloadState()
-              data class FetchingPlaylist(val message: String = "Fetching playlist...") : DownloadState()
-              data class Downloading(val done: Int, val total: Int) : DownloadState()
+              data class FetchingPlaylist(val message: String = "Fetching playlist...", val retryAttempt: Int = 0) : DownloadState()
+              data class Downloading(val done: Int, val total: Int, val retryAttempt: Int = 0) : DownloadState()
               data class Converting(val percent: Int) : DownloadState()
               data class Completed(val path: String) : DownloadState()
+              object Cancelled : DownloadState()
               data class Failed(val message: String) : DownloadState()
           }
 
@@ -522,19 +570,27 @@ jobs:
           class DownloadService : Service() {
 
               private val serviceJob = SupervisorJob()
-              private val serviceScope = CoroutineScope(Dispatchers.Default + serviceJob)
+              private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
 
               private var wakeLock: PowerManager.WakeLock? = null
               private var transformer: Transformer? = null
               private val progressHolder = ProgressHolder()
               private val progressHandler = Handler(Looper.getMainLooper())
               private var isRunning = false
+              private var currentJob: Job? = null
+
+              // Tracks in-flight HTTP connections so a cancel request can force them to fail
+              // immediately instead of waiting out a connect/read timeout.
+              private val activeConnections = Collections.synchronizedSet(mutableSetOf<HttpURLConnection>())
 
               companion object {
                   private const val CHANNEL_ID = "download_channel"
                   private const val NOTIFICATION_ID = 1
+                  private const val INITIAL_RETRY_DELAY_MS = 1000L
+                  private const val MAX_RETRY_DELAY_MS = 30_000L
 
                   const val ACTION_START = "com.example.m3u8downloader.action.START"
+                  const val ACTION_CANCEL = "com.example.m3u8downloader.action.CANCEL"
                   const val EXTRA_URL = "extra_url"
                   const val EXTRA_REFERER = "extra_referer"
                   const val EXTRA_ORIGIN = "extra_origin"
@@ -567,6 +623,11 @@ jobs:
               override fun onBind(intent: Intent?): IBinder? = null
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent?.action == ACTION_CANCEL) {
+                      cancelDownload()
+                      return START_NOT_STICKY
+                  }
+
                   if (intent?.action == ACTION_START && !isRunning) {
                       val url = intent.getStringExtra(EXTRA_URL)
                       val userAgent = intent.getStringExtra(EXTRA_USER_AGENT).orEmpty()
@@ -588,21 +649,24 @@ jobs:
                       val tsFile = File(outputDir, "$outputName.ts")
                       val mp4File = File(outputDir, "$outputName.mp4")
 
-                      serviceScope.launch {
+                      currentJob = serviceScope.launch {
                           try {
-                              downloadToTs(url, referer, origin, cookie, userAgent, tsFile) { done, total ->
-                                  _state.value = DownloadState.Downloading(done, total)
-                                  updateNotification(
-                                      "Downloading $done/$total segments",
-                                      if (total > 0) done * 100 / total else 0,
-                                      false
-                                  )
+                              downloadToTs(url, referer, origin, cookie, userAgent, tsFile) { done, total, retryAttempt ->
+                                  _state.value = DownloadState.Downloading(done, total, retryAttempt)
+                                  val text = if (retryAttempt > 0) {
+                                      "Downloading $done/$total segments (retry #$retryAttempt)"
+                                  } else {
+                                      "Downloading $done/$total segments"
+                                  }
+                                  updateNotification(text, if (total > 0) done * 100 / total else 0, false)
                               }
                               _state.value = DownloadState.Converting(0)
                               updateNotification("Converting...", 0, false)
                               withContext(Dispatchers.Main) {
                                   remuxToMp4(tsFile, mp4File)
                               }
+                          } catch (e: CancellationException) {
+                              // Cancellation is already handled synchronously by cancelDownload().
                           } catch (e: Exception) {
                               _state.value = DownloadState.Failed(e.message ?: "Unknown error")
                               updateNotification("Failed: ${e.message}", 0, false)
@@ -611,6 +675,25 @@ jobs:
                       }
                   }
                   return START_NOT_STICKY
+              }
+
+              private fun cancelDownload() {
+                  if (!isRunning) return
+                  disconnectActiveConnections()
+                  currentJob?.cancel()
+                  transformer?.cancel()
+                  progressHandler.removeCallbacks(progressRunnable)
+                  _state.value = DownloadState.Cancelled
+                  getSystemService(NotificationManager::class.java)
+                      .notify(NOTIFICATION_ID, buildFinalNotification("Download cancelled"))
+                  finishService()
+              }
+
+              private fun disconnectActiveConnections() {
+                  synchronized(activeConnections) {
+                      activeConnections.forEach { it.disconnect() }
+                      activeConnections.clear()
+                  }
               }
 
               private fun startForegroundWithNotification(notification: Notification) {
@@ -696,6 +779,7 @@ jobs:
                   progressHandler.removeCallbacks(progressRunnable)
                   releaseWakeLock()
                   isRunning = false
+                  currentJob = null
                   stopForeground(STOP_FOREGROUND_DETACH)
                   stopSelf()
               }
@@ -715,17 +799,51 @@ jobs:
                   connection.connectTimeout = 20000
                   connection.readTimeout = 30000
                   connection.instanceFollowRedirects = true
+                  activeConnections.add(connection)
                   return connection
               }
 
               private fun fetchText(url: String, referer: String?, origin: String?, cookie: String?, userAgent: String): String {
                   val connection = openConnection(url, referer, origin, cookie, userAgent)
-                  connection.inputStream.use { return it.readBytes().toString(Charsets.UTF_8) }
+                  try {
+                      connection.inputStream.use { return it.readBytes().toString(Charsets.UTF_8) }
+                  } finally {
+                      activeConnections.remove(connection)
+                  }
               }
 
               private fun fetchBytes(url: String, referer: String?, origin: String?, cookie: String?, userAgent: String): ByteArray {
                   val connection = openConnection(url, referer, origin, cookie, userAgent)
-                  connection.inputStream.use { return it.readBytes() }
+                  try {
+                      connection.inputStream.use { return it.readBytes() }
+                  } finally {
+                      activeConnections.remove(connection)
+                  }
+              }
+
+              /**
+               * Retries [block] forever with capped exponential backoff until it succeeds or the
+               * enclosing coroutine is cancelled (e.g. via the Cancel button), in which case the
+               * [CancellationException] is rethrown instead of retried.
+               */
+              private suspend fun <T> retryIndefinitely(
+                  onRetry: (attempt: Int, error: Exception) -> Unit,
+                  block: () -> T
+              ): T {
+                  var attempt = 0
+                  var delayMs = INITIAL_RETRY_DELAY_MS
+                  while (true) {
+                      try {
+                          return block()
+                      } catch (e: CancellationException) {
+                          throw e
+                      } catch (e: Exception) {
+                          attempt++
+                          onRetry(attempt, e)
+                          delay(delayMs)
+                          delayMs = (delayMs * 2).coerceAtMost(MAX_RETRY_DELAY_MS)
+                      }
+                  }
               }
 
               private fun resolveUrl(baseUrl: String, ref: String): String {
@@ -774,18 +892,21 @@ jobs:
                   return ByteArray(clean.length / 2) { i -> clean.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
               }
 
-              private fun decrypt(
+              private suspend fun decrypt(
                   raw: ByteArray,
                   segment: Segment,
                   keyCache: MutableMap<String, ByteArray>,
+                  keyCacheMutex: Mutex,
                   referer: String?,
                   origin: String?,
                   cookie: String?,
                   userAgent: String
               ): ByteArray {
                   if (segment.keyUri == null || segment.keyMethod != "AES-128") return raw
-                  val key = keyCache.getOrPut(segment.keyUri) {
-                      fetchBytes(segment.keyUri, referer, origin, cookie, userAgent)
+                  val key = keyCacheMutex.withLock {
+                      keyCache[segment.keyUri] ?: retryIndefinitely(onRetry = { _, _ -> }) {
+                          fetchBytes(segment.keyUri, referer, origin, cookie, userAgent)
+                      }.also { keyCache[segment.keyUri] = it }
                   }
                   val iv = segment.keyIv?.removePrefix("0x")?.removePrefix("0X")?.let { hexToBytes(it) }
                       ?: MessageDigest.getInstance("MD5").digest(segment.url.toByteArray()).copyOf(16)
@@ -801,15 +922,25 @@ jobs:
                   cookie: String?,
                   userAgent: String,
                   outputTsFile: File,
-                  onProgress: (Int, Int) -> Unit
+                  onProgress: (done: Int, total: Int, retryAttempt: Int) -> Unit
               ): Int {
-                  val rootContent = fetchText(sourceUrl, referer, origin, cookie, userAgent)
+                  val onPlaylistRetry = { attempt: Int, _: Exception ->
+                      _state.value = DownloadState.FetchingPlaylist(retryAttempt = attempt)
+                      updateNotification("Fetching playlist... (retry #$attempt)", 0, true)
+                  }
+
+                  val rootContent = retryIndefinitely(onPlaylistRetry) {
+                      fetchText(sourceUrl, referer, origin, cookie, userAgent)
+                  }
                   val isMaster = rootContent.lines().any { it.trim().startsWith("#EXT-X-STREAM-INF") }
 
                   val (mediaUrl, mediaContent) = if (isMaster) {
                       val variants = parseVariants(rootContent, sourceUrl)
                       val chosen = variants.firstOrNull() ?: throw IllegalStateException("No variants found")
-                      chosen.url to fetchText(chosen.url, referer, origin, cookie, userAgent)
+                      val content = retryIndefinitely(onPlaylistRetry) {
+                          fetchText(chosen.url, referer, origin, cookie, userAgent)
+                      }
+                      chosen.url to content
                   } else {
                       sourceUrl to rootContent
                   }
@@ -819,6 +950,7 @@ jobs:
 
                   val results = arrayOfNulls<ByteArray>(segments.size)
                   val keyCache = mutableMapOf<String, ByteArray>()
+                  val keyCacheMutex = Mutex()
                   val semaphore = Semaphore(6)
                   val completed = AtomicInteger(0)
 
@@ -826,9 +958,13 @@ jobs:
                       val jobs = segments.mapIndexed { index, segment ->
                           async {
                               semaphore.withPermit {
-                                  val raw = fetchBytes(segment.url, referer, origin, cookie, userAgent)
-                                  results[index] = decrypt(raw, segment, keyCache, referer, origin, cookie, userAgent)
-                                  onProgress(completed.incrementAndGet(), segments.size)
+                                  val raw = retryIndefinitely(onRetry = { attempt, _ ->
+                                      onProgress(completed.get(), segments.size, attempt)
+                                  }) {
+                                      fetchBytes(segment.url, referer, origin, cookie, userAgent)
+                                  }
+                                  results[index] = decrypt(raw, segment, keyCache, keyCacheMutex, referer, origin, cookie, userAgent)
+                                  onProgress(completed.incrementAndGet(), segments.size, 0)
                               }
                           }
                       }
@@ -851,6 +987,9 @@ jobs:
                       .setAudioMimeType(MimeTypes.AUDIO_AAC)
                       .addListener(object : Transformer.Listener {
                           override fun onCompleted(composition: Composition, result: ExportResult) {
+                              // If the user already hit Cancel, finishService() has run and
+                              // isRunning is false; don't clobber the Cancelled state.
+                              if (!isRunning) return
                               tsFile.delete()
                               _state.value = DownloadState.Completed(mp4File.absolutePath)
                               getSystemService(NotificationManager::class.java)
@@ -863,6 +1002,7 @@ jobs:
                               result: ExportResult,
                               exception: ExportException
                           ) {
+                              if (!isRunning) return
                               _state.value = DownloadState.Failed(exception.message ?: "Conversion failed")
                               getSystemService(NotificationManager::class.java)
                                   .notify(NOTIFICATION_ID, buildFinalNotification("Conversion failed: ${exception.message}"))
@@ -879,9 +1019,12 @@ jobs:
               override fun onDestroy() {
                   super.onDestroy()
                   progressHandler.removeCallbacks(progressRunnable)
+                  disconnectActiveConnections()
                   serviceJob.cancel()
                   releaseWakeLock()
                   transformer = null
+                  currentJob = null
+                  isRunning = false
               }
           }
           DOWNLOAD_SERVICE
