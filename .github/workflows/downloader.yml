@@ -1,0 +1,609 @@
+name: Build M3U8 Downloader APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Create project structure
+        run: |
+          mkdir -p app/src/main/java/com/example/m3u8downloader
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+
+      - name: Write settings.gradle
+        run: |
+          cat > settings.gradle <<'SETTINGS_GRADLE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = "M3U8Downloader"
+          include ':app'
+          SETTINGS_GRADLE
+
+      - name: Write root build.gradle
+        run: |
+          cat > build.gradle <<'ROOT_BUILD_GRADLE'
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.5.2'
+                  classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24'
+              }
+          }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          ROOT_BUILD_GRADLE
+
+      - name: Write gradle.properties
+        run: |
+          cat > gradle.properties <<'GRADLE_PROPERTIES'
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          org.gradle.jvmargs=-Xmx2048m
+          GRADLE_PROPERTIES
+
+      - name: Write local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Write app build.gradle
+        run: |
+          cat > app/build.gradle <<'APP_BUILD_GRADLE'
+          apply plugin: 'com.android.application'
+          apply plugin: 'kotlin-android'
+
+          android {
+              namespace 'com.example.m3u8downloader'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.example.m3u8downloader"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  debug {}
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+
+              buildFeatures {
+                  viewBinding true
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.13.1'
+              implementation 'androidx.appcompat:appcompat:1.7.0'
+              implementation 'com.google.android.material:material:1.12.0'
+              implementation 'androidx.activity:activity-ktx:1.9.0'
+              implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.4'
+              implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0'
+              implementation 'androidx.media3:media3-transformer:1.4.1'
+              implementation 'androidx.media3:media3-common:1.4.1'
+              implementation 'androidx.media3:media3-effect:1.4.1'
+              implementation 'androidx.media3:media3-exoplayer:1.4.1'
+              implementation 'androidx.media3:media3-ui:1.4.1'
+          }
+          APP_BUILD_GRADLE
+
+      - name: Write AndroidManifest.xml
+        run: |
+          cat > app/src/main/AndroidManifest.xml <<'ANDROID_MANIFEST'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="@string/app_name"
+                  android:theme="@style/Theme.M3U8Downloader">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          ANDROID_MANIFEST
+
+      - name: Write strings.xml
+        run: |
+          cat > app/src/main/res/values/strings.xml <<'STRINGS_XML'
+          <resources>
+              <string name="app_name">M3U8 Downloader</string>
+          </resources>
+          STRINGS_XML
+
+      - name: Write themes.xml
+        run: |
+          cat > app/src/main/res/values/themes.xml <<'THEMES_XML'
+          <resources>
+              <style name="Theme.M3U8Downloader" parent="Theme.Material3.DayNight.NoActionBar" />
+          </resources>
+          THEMES_XML
+
+      - name: Write activity_main.xml
+        run: |
+          cat > app/src/main/res/layout/activity_main.xml <<'ACTIVITY_MAIN_XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:app="http://schemas.android.com/apk/res-auto"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:orientation="vertical"
+                  android:padding="16dp">
+
+                  <EditText
+                      android:id="@+id/editUrl"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:hint="M3U8 URL"
+                      android:inputType="textUri" />
+
+                  <EditText
+                      android:id="@+id/editReferer"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp"
+                      android:hint="Referer (optional)"
+                      android:inputType="textUri" />
+
+                  <EditText
+                      android:id="@+id/editOrigin"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp"
+                      android:hint="Origin (optional)"
+                      android:inputType="textUri" />
+
+                  <EditText
+                      android:id="@+id/editCookie"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp"
+                      android:hint="Cookie (optional)"
+                      android:inputType="text" />
+
+                  <EditText
+                      android:id="@+id/editUserAgent"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp"
+                      android:hint="User-Agent (optional, default Chrome desktop)"
+                      android:inputType="text" />
+
+                  <EditText
+                      android:id="@+id/editOutputName"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp"
+                      android:hint="Output file name (optional)"
+                      android:inputType="text" />
+
+                  <Button
+                      android:id="@+id/buttonDownload"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      android:text="Download and Convert" />
+
+                  <ProgressBar
+                      android:id="@+id/progressBar"
+                      style="@android:style/Widget.ProgressBar.Horizontal"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      android:max="100"
+                      android:visibility="gone" />
+
+                  <TextView
+                      android:id="@+id/textStatus"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="8dp" />
+
+                  <androidx.media3.ui.PlayerView
+                      android:id="@+id/playerView"
+                      android:layout_width="match_parent"
+                      android:layout_height="220dp"
+                      android:layout_marginTop="8dp"
+                      android:visibility="gone"
+                      app:use_controller="true" />
+
+              </LinearLayout>
+          </ScrollView>
+          ACTIVITY_MAIN_XML
+
+      - name: Write MainActivity.kt
+        run: |
+          cat > app/src/main/java/com/example/m3u8downloader/MainActivity.kt <<'MAIN_ACTIVITY'
+          package com.example.m3u8downloader
+
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Environment
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.View
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.lifecycle.lifecycleScope
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MimeTypes
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.transformer.Composition
+          import androidx.media3.transformer.EditedMediaItem
+          import androidx.media3.transformer.ExportException
+          import androidx.media3.transformer.ExportResult
+          import androidx.media3.transformer.ProgressHolder
+          import androidx.media3.transformer.Transformer
+          import com.example.m3u8downloader.databinding.ActivityMainBinding
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.async
+          import kotlinx.coroutines.coroutineScope
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.sync.Semaphore
+          import kotlinx.coroutines.sync.withPermit
+          import kotlinx.coroutines.withContext
+          import java.io.File
+          import java.io.RandomAccessFile
+          import java.net.HttpURLConnection
+          import java.net.URI
+          import java.net.URL
+          import java.security.MessageDigest
+          import java.util.concurrent.atomic.AtomicInteger
+          import javax.crypto.Cipher
+          import javax.crypto.spec.IvParameterSpec
+          import javax.crypto.spec.SecretKeySpec
+
+          data class Variant(val bandwidth: Long, val url: String)
+          data class Segment(val url: String, val keyUri: String?, val keyMethod: String?, val keyIv: String?)
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var binding: ActivityMainBinding
+              private var player: ExoPlayer? = null
+              private var transformer: Transformer? = null
+              private val progressHolder = ProgressHolder()
+              private val progressHandler = Handler(Looper.getMainLooper())
+
+              private val progressRunnable = object : Runnable {
+                  override fun run() {
+                      val state = transformer?.getProgress(progressHolder)
+                      if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                          binding.progressBar.progress = progressHolder.progress
+                          binding.textStatus.text = "Converting: ${progressHolder.progress}%"
+                          progressHandler.postDelayed(this, 300)
+                      } else if (state != Transformer.PROGRESS_STATE_NOT_STARTED) {
+                          progressHandler.postDelayed(this, 300)
+                      }
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  binding = ActivityMainBinding.inflate(layoutInflater)
+                  setContentView(binding.root)
+
+                  binding.buttonDownload.setOnClickListener {
+                      startDownload()
+                  }
+              }
+
+              private fun startDownload() {
+                  val url = binding.editUrl.text.toString().trim()
+                  if (url.isEmpty()) {
+                      Toast.makeText(this, "Enter a .m3u8 URL", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                      Toast.makeText(this, "URL must start with http:// or https://", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+
+                  val referer = binding.editReferer.text.toString().trim().ifBlank { null }
+                  val origin = binding.editOrigin.text.toString().trim().ifBlank { null }
+                  val cookie = binding.editCookie.text.toString().trim().ifBlank { null }
+                  val userAgent = binding.editUserAgent.text.toString().trim().ifBlank {
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                  }
+                  val outputName = binding.editOutputName.text.toString().trim().ifBlank {
+                      "m3u8_${System.currentTimeMillis()}"
+                  }.replace(Regex("[^A-Za-z0-9_-]"), "_")
+
+                  binding.progressBar.visibility = View.VISIBLE
+                  binding.progressBar.progress = 0
+                  binding.playerView.visibility = View.GONE
+                  binding.textStatus.text = "Fetching playlist..."
+                  binding.buttonDownload.isEnabled = false
+
+                  val outputDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+                  val tsFile = File(outputDir, "$outputName.ts")
+                  val mp4File = File(outputDir, "$outputName.mp4")
+
+                  lifecycleScope.launch {
+                      try {
+                          val segmentCount = withContext(Dispatchers.IO) {
+                              downloadToTs(url, referer, origin, cookie, userAgent, tsFile) { done, total ->
+                                  runOnUiThread {
+                                      binding.textStatus.text = "Downloaded $done/$total segments"
+                                  }
+                              }
+                          }
+                          binding.textStatus.text = "Downloaded $segmentCount segments. Converting..."
+                          remuxToMp4(tsFile, mp4File)
+                      } catch (e: Exception) {
+                          binding.progressBar.visibility = View.GONE
+                          binding.buttonDownload.isEnabled = true
+                          binding.textStatus.text = "Failed: ${e.message}"
+                      }
+                  }
+              }
+
+              private fun openConnection(
+                  target: String,
+                  referer: String?,
+                  origin: String?,
+                  cookie: String?,
+                  userAgent: String
+              ): HttpURLConnection {
+                  val connection = URL(target).openConnection() as HttpURLConnection
+                  connection.setRequestProperty("User-Agent", userAgent)
+                  referer?.let { connection.setRequestProperty("Referer", it) }
+                  origin?.let { connection.setRequestProperty("Origin", it) }
+                  cookie?.let { connection.setRequestProperty("Cookie", it) }
+                  connection.connectTimeout = 20000
+                  connection.readTimeout = 30000
+                  connection.instanceFollowRedirects = true
+                  return connection
+              }
+
+              private fun fetchText(url: String, referer: String?, origin: String?, cookie: String?, userAgent: String): String {
+                  val connection = openConnection(url, referer, origin, cookie, userAgent)
+                  connection.inputStream.use { return it.readBytes().toString(Charsets.UTF_8) }
+              }
+
+              private fun fetchBytes(url: String, referer: String?, origin: String?, cookie: String?, userAgent: String): ByteArray {
+                  val connection = openConnection(url, referer, origin, cookie, userAgent)
+                  connection.inputStream.use { return it.readBytes() }
+              }
+
+              private fun resolveUrl(baseUrl: String, ref: String): String {
+                  return if (ref.startsWith("http://") || ref.startsWith("https://")) ref
+                  else URI.create(baseUrl).resolve(ref).toString()
+              }
+
+              private fun parseVariants(content: String, baseUrl: String): List<Variant> {
+                  val lines = content.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                  val variants = mutableListOf<Variant>()
+                  var bandwidth = 0L
+                  for (line in lines) {
+                      if (line.startsWith("#EXT-X-STREAM-INF")) {
+                          bandwidth = Regex("BANDWIDTH=(\\d+)").find(line)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                      } else if (!line.startsWith("#")) {
+                          variants.add(Variant(bandwidth, resolveUrl(baseUrl, line)))
+                      }
+                  }
+                  return variants.sortedByDescending { it.bandwidth }
+              }
+
+              private fun parseSegments(content: String, baseUrl: String): List<Segment> {
+                  val lines = content.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                  val segments = mutableListOf<Segment>()
+                  var keyUri: String? = null
+                  var keyMethod: String? = null
+                  var keyIv: String? = null
+                  for (line in lines) {
+                      when {
+                          line.startsWith("#EXT-X-KEY") -> {
+                              keyMethod = Regex("METHOD=([^,]+)").find(line)?.groupValues?.get(1)
+                              keyUri = Regex("URI=\"([^\"]+)\"").find(line)?.groupValues?.get(1)?.let { resolveUrl(baseUrl, it) }
+                              keyIv = Regex("IV=(0[xX][0-9A-Fa-f]+)").find(line)?.groupValues?.get(1)
+                              if (keyMethod == "NONE") { keyUri = null; keyMethod = null; keyIv = null }
+                          }
+                          !line.startsWith("#") -> {
+                              segments.add(Segment(resolveUrl(baseUrl, line), keyUri, keyMethod, keyIv))
+                          }
+                      }
+                  }
+                  return segments
+              }
+
+              private fun hexToBytes(hex: String): ByteArray {
+                  val clean = if (hex.length % 2 != 0) "0$hex" else hex
+                  return ByteArray(clean.length / 2) { i -> clean.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+              }
+
+              private fun decrypt(
+                  raw: ByteArray,
+                  segment: Segment,
+                  keyCache: MutableMap<String, ByteArray>,
+                  referer: String?,
+                  origin: String?,
+                  cookie: String?,
+                  userAgent: String
+              ): ByteArray {
+                  if (segment.keyUri == null || segment.keyMethod != "AES-128") return raw
+                  val key = keyCache.getOrPut(segment.keyUri) {
+                      fetchBytes(segment.keyUri, referer, origin, cookie, userAgent)
+                  }
+                  val iv = segment.keyIv?.removePrefix("0x")?.removePrefix("0X")?.let { hexToBytes(it) }
+                      ?: MessageDigest.getInstance("MD5").digest(segment.url.toByteArray()).copyOf(16)
+                  val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+                  cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                  return cipher.doFinal(raw)
+              }
+
+              private suspend fun downloadToTs(
+                  sourceUrl: String,
+                  referer: String?,
+                  origin: String?,
+                  cookie: String?,
+                  userAgent: String,
+                  outputTsFile: File,
+                  onProgress: (Int, Int) -> Unit
+              ): Int {
+                  val rootContent = fetchText(sourceUrl, referer, origin, cookie, userAgent)
+                  val isMaster = rootContent.lines().any { it.trim().startsWith("#EXT-X-STREAM-INF") }
+
+                  val (mediaUrl, mediaContent) = if (isMaster) {
+                      val variants = parseVariants(rootContent, sourceUrl)
+                      val chosen = variants.firstOrNull() ?: throw IllegalStateException("No variants found")
+                      chosen.url to fetchText(chosen.url, referer, origin, cookie, userAgent)
+                  } else {
+                      sourceUrl to rootContent
+                  }
+
+                  val segments = parseSegments(mediaContent, mediaUrl)
+                  if (segments.isEmpty()) throw IllegalStateException("No segments found in playlist")
+
+                  val results = arrayOfNulls<ByteArray>(segments.size)
+                  val keyCache = mutableMapOf<String, ByteArray>()
+                  val semaphore = Semaphore(6)
+                  val completed = AtomicInteger(0)
+
+                  coroutineScope {
+                      val jobs = segments.mapIndexed { index, segment ->
+                          async {
+                              semaphore.withPermit {
+                                  val raw = fetchBytes(segment.url, referer, origin, cookie, userAgent)
+                                  results[index] = decrypt(raw, segment, keyCache, referer, origin, cookie, userAgent)
+                                  onProgress(completed.incrementAndGet(), segments.size)
+                              }
+                          }
+                      }
+                      jobs.forEach { it.await() }
+                  }
+
+                  RandomAccessFile(outputTsFile, "rw").use { raf ->
+                      for (chunk in results) raf.write(chunk ?: throw IllegalStateException("Missing segment data"))
+                  }
+
+                  return segments.size
+              }
+
+              private fun remuxToMp4(tsFile: File, mp4File: File) {
+                  val mediaItem = MediaItem.fromUri(Uri.fromFile(tsFile))
+                  val editedMediaItem = EditedMediaItem.Builder(mediaItem).build()
+
+                  val newTransformer = Transformer.Builder(this)
+                      .setVideoMimeType(MimeTypes.VIDEO_H264)
+                      .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                      .addListener(object : Transformer.Listener {
+                          override fun onCompleted(composition: Composition, result: ExportResult) {
+                              progressHandler.removeCallbacks(progressRunnable)
+                              binding.progressBar.visibility = View.GONE
+                              binding.buttonDownload.isEnabled = true
+                              binding.textStatus.text = "Saved to ${mp4File.absolutePath}"
+                              tsFile.delete()
+                              previewVideo(Uri.fromFile(mp4File))
+                          }
+
+                          override fun onError(
+                              composition: Composition,
+                              result: ExportResult,
+                              exception: ExportException
+                          ) {
+                              progressHandler.removeCallbacks(progressRunnable)
+                              binding.progressBar.visibility = View.GONE
+                              binding.buttonDownload.isEnabled = true
+                              binding.textStatus.text = "Conversion failed: ${exception.message}"
+                          }
+                      })
+                      .build()
+
+                  transformer = newTransformer
+                  newTransformer.start(editedMediaItem, mp4File.absolutePath)
+                  progressHandler.post(progressRunnable)
+              }
+
+              private fun previewVideo(uri: Uri) {
+                  player?.release()
+                  val exoPlayer = ExoPlayer.Builder(this).build()
+                  exoPlayer.setMediaItem(MediaItem.fromUri(uri))
+                  exoPlayer.prepare()
+                  binding.playerView.player = exoPlayer
+                  binding.playerView.visibility = View.VISIBLE
+                  player = exoPlayer
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  player?.pause()
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  progressHandler.removeCallbacks(progressRunnable)
+                  player?.release()
+                  player = null
+              }
+          }
+          MAIN_ACTIVITY
+
+      - name: Generate Gradle wrapper
+        run: gradle wrapper --gradle-version 8.7
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m3u8-downloader-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
