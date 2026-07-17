@@ -583,6 +583,7 @@ jobs:
           import android.os.Looper
           import android.os.PowerManager
           import android.provider.MediaStore
+          import android.provider.OpenableColumns
           import androidx.core.app.NotificationCompat
           import androidx.media3.common.MediaItem
           import androidx.media3.common.MimeTypes
@@ -603,6 +604,7 @@ jobs:
           import kotlinx.coroutines.launch
           import kotlinx.coroutines.withContext
           import java.io.File
+          import java.io.IOException
 
           sealed class ConvertState {
               object Idle : ConvertState()
@@ -664,6 +666,41 @@ jobs:
               override fun onCreate() {
                   super.onCreate()
                   createNotificationChannel()
+                  installCrashSafetyNet()
+              }
+
+              /**
+               * Transformer does its actual encoding work on internal background threads (codec
+               * callback threads, GL threads for effects, etc.) that are outside the coroutine
+               * try/catch below. An uncaught Throwable on any of those threads (e.g. an
+               * OutOfMemoryError from codec buffers, or an IOException from running out of disk
+               * space while writing a large output file) would otherwise kill the whole process.
+               * This handler intercepts those, fails the conversion gracefully instead, and only
+               * falls back to the previous default handler for threads unrelated to this service.
+               */
+              private fun installCrashSafetyNet() {
+                  val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+                  Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                      if (isRunning) {
+                          val message = when (throwable) {
+                              is OutOfMemoryError -> "Out of memory — try a smaller video or free up device memory"
+                              is IOException -> "Storage error during conversion — check available free space"
+                              else -> throwable.message ?: "Conversion crashed unexpectedly"
+                          }
+                          try {
+                              _state.value = ConvertState.Failed(message)
+                              updateNotification("Failed: $message", 0, false)
+                              outputMp4File?.delete()
+                              releaseWakeLock()
+                              isRunning = false
+                              currentJob?.cancel()
+                              transformer?.cancel()
+                          } catch (inner: Throwable) {
+                              // Best-effort cleanup only; fall through to the previous handler below.
+                          }
+                      }
+                      previousHandler?.uncaughtException(thread, throwable)
+                  }
               }
 
               override fun onBind(intent: Intent?): IBinder? = null
@@ -691,6 +728,22 @@ jobs:
                       val workDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
                       val mp4File = File(workDir, "$outputName.mp4")
                       outputMp4File = mp4File
+
+                      // Preflight: bail out cleanly if there isn't enough free space for the
+                      // output file, instead of letting the encoder crash mid-write on a large
+                      // file. Assume worst case the output can be as large as the input.
+                      val inputSizeBytes = querySize(inputUri) ?: 0L
+                      val freeSpaceBytes = workDir?.freeSpace ?: -1L
+                      val requiredBytes = inputSizeBytes + 200L * 1024 * 1024
+                      if (inputSizeBytes > 0 && freeSpaceBytes >= 0 && freeSpaceBytes < requiredBytes) {
+                          _state.value = ConvertState.Failed("Not enough free storage space to convert this file")
+                          updateNotification("Failed: Not enough free storage space", 0, false)
+                          isRunning = false
+                          releaseWakeLock()
+                          stopForeground(STOP_FOREGROUND_DETACH)
+                          stopSelf()
+                          return START_NOT_STICKY
+                      }
 
                       currentJob = serviceScope.launch {
                           try {
@@ -883,6 +936,21 @@ jobs:
               private fun releaseWakeLock() {
                   if (wakeLock?.isHeld == true) wakeLock?.release()
                   wakeLock = null
+              }
+
+              private fun querySize(uri: Uri): Long? {
+                  return try {
+                      contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                          val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                          if (sizeIndex >= 0 && cursor.moveToFirst() && !cursor.isNull(sizeIndex)) {
+                              cursor.getLong(sizeIndex)
+                          } else {
+                              null
+                          }
+                      }
+                  } catch (e: Exception) {
+                      null
+                  }
               }
 
               private fun finishService() {
