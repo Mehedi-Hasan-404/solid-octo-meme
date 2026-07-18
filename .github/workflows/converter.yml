@@ -720,6 +720,7 @@ jobs:
           import androidx.media3.transformer.ExportResult
           import androidx.media3.transformer.ProgressHolder
           import androidx.media3.transformer.Transformer
+          import com.google.common.collect.ImmutableList
           import java.util.Locale
           import kotlinx.coroutines.CancellationException
           import kotlinx.coroutines.CoroutineScope
@@ -927,14 +928,16 @@ jobs:
                   // reliability. The user picks per-conversion via the toggle in MainActivity.
                   val encoderSelector = if (useSoftwareEncoder) {
                       EncoderSelector { mimeType ->
-                          EncoderSelector.DEFAULT.selectEncoderInfos(mimeType)
-                              .filter { isSoftwareCodec(it) }
+                          ImmutableList.copyOf(
+                              EncoderSelector.DEFAULT.selectEncoderInfos(mimeType)
+                                  .filter { isSoftwareCodec(it) }
+                          )
                       }
                   } else {
                       EncoderSelector.DEFAULT
                   }
                   val encoderFactory = DefaultEncoderFactory.Builder(this)
-                      .setEncoderSelector(encoderSelector)
+                      .setVideoEncoderSelector(encoderSelector)
                       .setEnableFallback(!useSoftwareEncoder)
                       .build()
 
