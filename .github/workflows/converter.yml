@@ -145,6 +145,7 @@ jobs:
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
               <application
+                  android:name=".VideoConverterApplication"
                   android:allowBackup="true"
                   android:largeHeap="true"
                   android:icon="@android:drawable/sym_def_app_icon"
@@ -560,6 +561,98 @@ jobs:
               }
           }
           MAIN_ACTIVITY
+
+      - name: Write VideoConverterApplication.kt
+        run: |
+          cat > app/src/main/java/com/example/videoconverter/VideoConverterApplication.kt <<'APPLICATION_KT'
+          package com.example.videoconverter
+
+          import android.app.Application
+          import android.content.ContentValues
+          import android.os.Build
+          import android.os.Environment
+          import android.provider.MediaStore
+          import java.io.File
+          import java.io.PrintWriter
+          import java.io.StringWriter
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          /**
+           * Catches any uncaught exception anywhere in the app (not just inside ConvertService)
+           * and writes a plain-text crash report to the Downloads folder before letting the
+           * previous handler run (which normally still shows the system "app has stopped" dialog
+           * and kills the process — this only adds a log alongside that, it doesn't prevent it).
+           */
+          class VideoConverterApplication : Application() {
+
+              override fun onCreate() {
+                  super.onCreate()
+                  installCrashLogger()
+              }
+
+              private fun installCrashLogger() {
+                  val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+                  Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                      try {
+                          writeCrashReport(thread, throwable)
+                      } catch (e: Exception) {
+                          // Never let the logger itself throw and mask the real crash.
+                      }
+                      previousHandler?.uncaughtException(thread, throwable)
+                  }
+              }
+
+              private fun writeCrashReport(thread: Thread, throwable: Throwable) {
+                  val sw = StringWriter()
+                  throwable.printStackTrace(PrintWriter(sw))
+                  val stackTrace = sw.toString()
+
+                  val timestamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
+                  val versionName = try {
+                      packageManager.getPackageInfo(packageName, 0).versionName
+                  } catch (e: Exception) {
+                      "unknown"
+                  }
+
+                  val report = buildString {
+                      appendLine("=== CRASH REPORT ===")
+                      appendLine("Time: $timestamp")
+                      appendLine("Thread: ${thread.name}")
+                      appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+                      appendLine("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
+                      appendLine("App Version: $versionName")
+                      appendLine("====================")
+                      appendLine()
+                      appendLine(stackTrace)
+                  }
+
+                  val fileName = "crash_$timestamp.txt"
+
+                  // Public Downloads dir requires MediaStore on API 29+ (scoped storage); the
+                  // direct File path only works on API 28 and below, matching the same split
+                  // used elsewhere in this app (see ConvertService.saveToDownloads).
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      val values = ContentValues().apply {
+                          put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                          put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                          put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                      }
+                      val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                      uri?.let {
+                          contentResolver.openOutputStream(it)?.use { out ->
+                              out.write(report.toByteArray())
+                          }
+                      }
+                  } else {
+                      val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                      if (!downloadsDir.exists()) downloadsDir.mkdirs()
+                      File(downloadsDir, fileName).writeText(report)
+                  }
+              }
+          }
+          APPLICATION_KT
 
       - name: Write ConvertService.kt
         run: |
