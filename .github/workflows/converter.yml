@@ -243,6 +243,14 @@ jobs:
                       android:hint="Output file name (optional)"
                       android:inputType="text" />
 
+                  <com.google.android.material.switchmaterial.SwitchMaterial
+                      android:id="@+id/switchSoftwareEncoder"
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      android:text="Use software encoder (slower, more compatible)"
+                      android:checked="false" />
+
                   <Button
                       android:id="@+id/buttonConvert"
                       android:layout_width="match_parent"
@@ -501,6 +509,7 @@ jobs:
                       putExtra(ConvertService.EXTRA_INPUT_URI, uri)
                       putExtra(ConvertService.EXTRA_OUTPUT_NAME, outputName)
                       putExtra(ConvertService.EXTRA_OUTPUT_EXTENSION, outputExtension)
+                      putExtra(ConvertService.EXTRA_USE_SOFTWARE_ENCODER, binding.switchSoftwareEncoder.isChecked)
                   }
                   ContextCompat.startForegroundService(this, intent)
               }
@@ -567,11 +576,14 @@ jobs:
           cat > app/src/main/java/com/example/videoconverter/VideoConverterApplication.kt <<'APPLICATION_KT'
           package com.example.videoconverter
 
+          import android.Manifest
           import android.app.Application
           import android.content.ContentValues
+          import android.content.pm.PackageManager
           import android.os.Build
           import android.os.Environment
           import android.provider.MediaStore
+          import androidx.core.content.ContextCompat
           import java.io.File
           import java.io.PrintWriter
           import java.io.StringWriter
@@ -646,9 +658,28 @@ jobs:
                           }
                       }
                   } else {
-                      val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                      if (!downloadsDir.exists()) downloadsDir.mkdirs()
-                      File(downloadsDir, fileName).writeText(report)
+                      val hasPermission = ContextCompat.checkSelfPermission(
+                          this, Manifest.permission.WRITE_EXTERNAL_STORAGE
+                      ) == PackageManager.PERMISSION_GRANTED
+
+                      if (hasPermission) {
+                          val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                          if (!downloadsDir.exists()) downloadsDir.mkdirs()
+                          File(downloadsDir, fileName).writeText(report)
+                      } else {
+                          // Permission not granted yet (e.g. crash happened before the user ever
+                          // started a conversion, so they were never prompted). Fall back to
+                          // app-private external storage, which needs no permission, so the log
+                          // isn't lost — it just won't show up in the Downloads folder. It can
+                          // still be pulled via `adb shell run-as` or a file manager with root/
+                          // access, or simply found once WRITE_EXTERNAL_STORAGE is later granted
+                          // and a subsequent crash writes to the real Downloads folder instead.
+                          val fallbackDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                          if (fallbackDir != null) {
+                              if (!fallbackDir.exists()) fallbackDir.mkdirs()
+                              File(fallbackDir, fileName).writeText(report)
+                          }
+                      }
                   }
               }
           }
@@ -667,6 +698,7 @@ jobs:
           import android.content.ContentValues
           import android.content.Intent
           import android.content.pm.ServiceInfo
+          import android.media.MediaCodecInfo
           import android.media.MediaScannerConnection
           import android.net.Uri
           import android.os.Build
@@ -681,11 +713,14 @@ jobs:
           import androidx.media3.common.MediaItem
           import androidx.media3.common.MimeTypes
           import androidx.media3.transformer.Composition
+          import androidx.media3.transformer.DefaultEncoderFactory
           import androidx.media3.transformer.EditedMediaItem
+          import androidx.media3.transformer.EncoderSelector
           import androidx.media3.transformer.ExportException
           import androidx.media3.transformer.ExportResult
           import androidx.media3.transformer.ProgressHolder
           import androidx.media3.transformer.Transformer
+          import java.util.Locale
           import kotlinx.coroutines.CancellationException
           import kotlinx.coroutines.CoroutineScope
           import kotlinx.coroutines.Dispatchers
@@ -738,6 +773,7 @@ jobs:
                   const val EXTRA_INPUT_URI = "extra_input_uri"
                   const val EXTRA_OUTPUT_NAME = "extra_output_name"
                   const val EXTRA_OUTPUT_EXTENSION = "extra_output_extension"
+                  const val EXTRA_USE_SOFTWARE_ENCODER = "extra_use_software_encoder"
 
                   private val _state = MutableStateFlow<ConvertState>(ConvertState.Idle)
                   val state: StateFlow<ConvertState> = _state.asStateFlow()
@@ -812,6 +848,7 @@ jobs:
                       }
                       val outputName = intent.getStringExtra(EXTRA_OUTPUT_NAME) ?: "converted_${System.currentTimeMillis()}"
                       val outputExtension = intent.getStringExtra(EXTRA_OUTPUT_EXTENSION) ?: "mp4"
+                      val useSoftwareEncoder = intent.getBooleanExtra(EXTRA_USE_SOFTWARE_ENCODER, false)
 
                       isRunning = true
                       _state.value = ConvertState.Converting(0)
@@ -841,7 +878,7 @@ jobs:
                       currentJob = serviceScope.launch {
                           try {
                               withContext(Dispatchers.Main) {
-                                  runTransform(inputUri, mp4File, outputName, outputExtension)
+                                  runTransform(inputUri, mp4File, outputName, outputExtension, useSoftwareEncoder)
                               }
                           } catch (e: CancellationException) {
                               // Cancellation is already handled synchronously by cancelConversion().
@@ -872,14 +909,39 @@ jobs:
                   finishService()
               }
 
-              private fun runTransform(inputUri: Uri, mp4File: File, outputName: String, outputExtension: String) {
+              private fun runTransform(
+                  inputUri: Uri,
+                  mp4File: File,
+                  outputName: String,
+                  outputExtension: String,
+                  useSoftwareEncoder: Boolean
+              ) {
                   val mediaItem = MediaItem.fromUri(inputUri)
                   val editedMediaItem = EditedMediaItem.Builder(mediaItem).build()
                   val displayName = "$outputName.$outputExtension"
 
+                  // Hardware (MediaCodec HAL) encoding is faster and lighter on battery, but on
+                  // some devices a vendor driver bug will crash the whole process natively when
+                  // fed a large/unusual input — a crash that never reaches Kotlin's exception
+                  // handlers. Software encoding runs entirely in-process, trading speed for
+                  // reliability. The user picks per-conversion via the toggle in MainActivity.
+                  val encoderSelector = if (useSoftwareEncoder) {
+                      EncoderSelector { mimeType ->
+                          EncoderSelector.DEFAULT.selectEncoderInfos(mimeType)
+                              .filter { isSoftwareCodec(it) }
+                      }
+                  } else {
+                      EncoderSelector.DEFAULT
+                  }
+                  val encoderFactory = DefaultEncoderFactory.Builder(this)
+                      .setEncoderSelector(encoderSelector)
+                      .setEnableFallback(!useSoftwareEncoder)
+                      .build()
+
                   val newTransformer = Transformer.Builder(this)
                       .setVideoMimeType(MimeTypes.VIDEO_H264)
                       .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                      .setEncoderFactory(encoderFactory)
                       .addListener(object : Transformer.Listener {
                           override fun onCompleted(composition: Composition, result: ExportResult) {
                               if (!isRunning) return
@@ -1029,6 +1091,19 @@ jobs:
               private fun releaseWakeLock() {
                   if (wakeLock?.isHeld == true) wakeLock?.release()
                   wakeLock = null
+              }
+
+              private fun isSoftwareCodec(info: MediaCodecInfo): Boolean {
+                  return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      !info.isHardwareAccelerated
+                  } else {
+                      // isHardwareAccelerated() requires API 29+. On older devices, fall back to
+                      // the well-known naming convention: software codecs are "OMX.google.*" or
+                      // "c2.android.*"; anything else (e.g. "OMX.qcom.*", "OMX.mtk.*") is a
+                      // vendor hardware codec.
+                      val name = info.name.lowercase(Locale.US)
+                      name.startsWith("omx.google.") || name.startsWith("c2.android.")
+                  }
               }
 
               private fun querySize(uri: Uri): Long? {
