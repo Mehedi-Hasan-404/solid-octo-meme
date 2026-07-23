@@ -122,11 +122,18 @@ jobs:
               implementation 'androidx.appcompat:appcompat:1.7.0'
               implementation 'com.google.android.material:material:1.12.0'
               implementation 'androidx.activity:activity-ktx:1.9.0'
-              implementation 'androidx.media3:media3-transformer:1.4.1'
               implementation 'androidx.media3:media3-common:1.4.1'
-              implementation 'androidx.media3:media3-effect:1.4.1'
               implementation 'androidx.media3:media3-exoplayer:1.4.1'
               implementation 'androidx.media3:media3-ui:1.4.1'
+
+              // Unofficial community fork of the now-retired FFmpegKit (arthenica/ffmpeg-kit was
+              // pulled from Maven Central in April 2025). Needed because Media3's Transformer can
+              // only mux to MP4 - real MKV output requires an actual FFmpeg muxer.
+              // NOTE: this is a third-party, unofficial artifact, not an Anthropic- or
+              // Google-maintained one - verify it still resolves/builds before relying on it,
+              // and note it links GPL-licensed x264/x265 encoders (license implications if you
+              // distribute this app).
+              implementation 'com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1'
           }
           APP_BUILD_GRADLE
 
@@ -637,6 +644,27 @@ jobs:
                   player = exoPlayer
               }
 
+              /**
+               * Determines the source file's extension (falling back to its MIME type, then to
+               * mp4) so the trimmed output keeps the same container the user picked - e.g. an
+               * .mkv input now produces a real .mkv output instead of being silently renamed.
+               */
+              private fun resolveSourceExtension(uri: Uri): String {
+                  val path = uri.lastPathSegment
+                  val fromPath = path?.substringAfterLast('.', "")?.takeIf { it.length in 2..4 }
+                  if (fromPath != null) return fromPath.lowercase()
+
+                  val mimeType = contentResolver.getType(uri)
+                  return when (mimeType) {
+                      "video/x-matroska" -> "mkv"
+                      "video/quicktime" -> "mov"
+                      "video/webm" -> "webm"
+                      "video/x-msvideo" -> "avi"
+                      "video/mp4" -> "mp4"
+                      else -> "mp4"
+                  }
+              }
+
               private fun processVideo() {
                   val uri = selectedUri
                   if (uri == null) {
@@ -659,7 +687,8 @@ jobs:
                   val targetWidth = binding.editWidth.text.toString().toIntOrNull()
                   val targetBitrate = binding.editBitrate.text.toString().toIntOrNull()
 
-                  val outputName = "trimmed_${System.currentTimeMillis()}.mp4"
+                  val extension = resolveSourceExtension(uri)
+                  val outputName = "trimmed_${System.currentTimeMillis()}.$extension"
 
                   binding.progressBar.visibility = View.VISIBLE
                   binding.progressBar.progress = 0
@@ -711,28 +740,26 @@ jobs:
           import android.content.ContentValues
           import android.content.Context
           import android.content.Intent
+          import android.media.MediaMetadataRetriever
           import android.net.Uri
           import android.os.Build
           import android.os.Environment
-          import android.os.Handler
           import android.os.IBinder
-          import android.os.Looper
           import android.provider.MediaStore
           import androidx.core.app.NotificationCompat
-          import androidx.media3.common.MediaItem
-          import androidx.media3.common.MimeTypes
-          import androidx.media3.effect.Presentation
-          import androidx.media3.transformer.Composition
-          import androidx.media3.transformer.DefaultEncoderFactory
-          import androidx.media3.transformer.EditedMediaItem
-          import androidx.media3.transformer.Effects
-          import androidx.media3.transformer.ExportException
-          import androidx.media3.transformer.ExportResult
-          import androidx.media3.transformer.ProgressHolder
-          import androidx.media3.transformer.Transformer
-          import androidx.media3.transformer.VideoEncoderSettings
+          import com.arthenica.ffmpegkit.FFmpegKit
+          import com.arthenica.ffmpegkit.FFmpegSession
+          import com.arthenica.ffmpegkit.ReturnCode
+          import com.arthenica.ffmpegkit.Statistics
           import java.io.File
+          import java.io.IOException
 
+          /**
+           * Runs the trim/export through FFmpeg (via the ffmpeg-kit-16kb fork) instead of
+           * Media3's Transformer. This is what makes real .mkv output possible - Media3's
+           * built-in muxer can only write MP4 containers, so an .mkv source was previously
+           * always saved as .mp4 regardless of what the user picked.
+           */
           class ExportService : Service() {
 
               companion object {
@@ -756,23 +783,8 @@ jobs:
                   private const val NOTIFICATION_ID = 42
               }
 
-              private var transformer: Transformer? = null
-              private val progressHolder = ProgressHolder()
-              private val progressHandler = Handler(Looper.getMainLooper())
+              private var activeSession: FFmpegSession? = null
               private lateinit var notificationManager: NotificationManager
-
-              private val progressRunnable = object : Runnable {
-                  override fun run() {
-                      val state = transformer?.getProgress(progressHolder)
-                      if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
-                          updateNotification(progressHolder.progress)
-                          broadcastProgress(progressHolder.progress)
-                          progressHandler.postDelayed(this, 300)
-                      } else if (state != Transformer.PROGRESS_STATE_NOT_STARTED) {
-                          progressHandler.postDelayed(this, 300)
-                      }
-                  }
-              }
 
               override fun onCreate() {
                   super.onCreate()
@@ -808,6 +820,69 @@ jobs:
                   return START_NOT_STICKY
               }
 
+              /**
+               * Reads the source video's width/height so we can pick a sane default bitrate
+               * even when the user hasn't set a target width/height/bitrate.
+               */
+              private fun probeSourceResolution(uri: Uri): Pair<Int, Int>? {
+                  val retriever = MediaMetadataRetriever()
+                  return try {
+                      retriever.setDataSource(this, uri)
+                      val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+                      val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+                      val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                      if (w == null || h == null || w <= 0 || h <= 0) {
+                          null
+                      } else if (rotation == 90 || rotation == 270) {
+                          h to w
+                      } else {
+                          w to h
+                      }
+                  } catch (e: Exception) {
+                      null
+                  } finally {
+                      retriever.release()
+                  }
+              }
+
+              /** Rounds a dimension down to the nearest even number; most encoders reject odd width/height. */
+              private fun toEven(value: Int): Int = if (value % 2 == 0) value else value - 1
+
+              /**
+               * Targets a conservative bits-per-pixel budget (~0.07 bpp @ 30fps) that keeps
+               * quality reasonable while staying well within upload limits for platforms like
+               * Facebook/Instagram/WhatsApp, instead of an encoder-default bitrate that can
+               * rival or exceed the source file's own bitrate.
+               */
+              private fun calculateDefaultBitrate(width: Int, height: Int): Int {
+                  val raw = (width.toLong() * height.toLong() * 30L * 0.07).toInt()
+                  return raw.coerceIn(1_500_000, 12_000_000)
+              }
+
+              private fun mimeTypeForExtension(extension: String): String = when (extension.lowercase()) {
+                  "mkv" -> "video/x-matroska"
+                  "mov" -> "video/quicktime"
+                  "webm" -> "video/webm"
+                  "avi" -> "video/x-msvideo"
+                  else -> "video/mp4"
+              }
+
+              /**
+               * Builds the -vf scale filter for the requested target size. Using -2 for the
+               * unspecified dimension lets ffmpeg derive it from the source aspect ratio while
+               * guaranteeing an even number, which most encoders require.
+               */
+              private fun buildScaleFilter(width: Int?, height: Int?): String? = when {
+                  width != null && height != null -> {
+                      val w = toEven(width)
+                      val h = toEven(height)
+                      "scale=$w:$h:force_original_aspect_ratio=decrease,pad=$w:$h:(ow-iw)/2:(oh-ih)/2"
+                  }
+                  height != null -> "scale=-2:${toEven(height)}"
+                  width != null -> "scale=${toEven(width)}:-2"
+                  else -> null
+              }
+
               private fun startExport(
                   uri: Uri,
                   startMs: Long,
@@ -817,90 +892,107 @@ jobs:
                   bitrate: Int?,
                   outputName: String
               ) {
-                  val file = File(cacheDir, outputName)
+                  val extension = outputName.substringAfterLast('.', "mp4")
+                  val outputFile = File(cacheDir, outputName)
+                  val inputFile = File(cacheDir, "source_${System.currentTimeMillis()}.$extension")
 
-                  val clippingConfiguration = MediaItem.ClippingConfiguration.Builder()
-                      .setStartPositionMs(startMs)
-                      .setEndPositionMs(endMs)
-                      .build()
-
-                  val mediaItem = MediaItem.Builder()
-                      .setUri(uri)
-                      .setClippingConfiguration(clippingConfiguration)
-                      .build()
-
-                  val editedMediaItemBuilder = EditedMediaItem.Builder(mediaItem)
-
-                  if (width != null && height != null) {
-                      editedMediaItemBuilder.setEffects(
-                          Effects(
-                              emptyList(),
-                              listOf(Presentation.createForWidthAndHeight(width, height, Presentation.LAYOUT_SCALE_TO_FIT))
-                          )
-                      )
-                  } else if (height != null) {
-                      editedMediaItemBuilder.setEffects(
-                          Effects(emptyList(), listOf(Presentation.createForHeight(height)))
-                      )
+                  try {
+                      contentResolver.openInputStream(uri)?.use { input ->
+                          inputFile.outputStream().use { output -> input.copyTo(output) }
+                      } ?: run {
+                          finishWithError("Could not read the selected video")
+                          return
+                      }
+                  } catch (e: IOException) {
+                      finishWithError("Could not read the selected video: ${e.message}")
+                      return
                   }
 
-                  val transformerBuilder = Transformer.Builder(this)
-                      .setVideoMimeType(MimeTypes.VIDEO_H264)
-                      .addListener(object : Transformer.Listener {
-                          override fun onCompleted(composition: Composition, result: ExportResult) {
-                              progressHandler.removeCallbacks(progressRunnable)
-                              val downloadsUri = saveToDownloads(file, outputName)
-                              file.delete()
-                              if (downloadsUri != null) {
-                                  notificationManager.notify(
-                                      NOTIFICATION_ID,
-                                      buildFinalNotification("Export complete", "Saved to Download/$outputName")
-                                  )
-                                  broadcastComplete(downloadsUri, outputName)
-                              } else {
-                                  val message = "Saving to Downloads failed"
-                                  notificationManager.notify(
-                                      NOTIFICATION_ID,
-                                      buildFinalNotification("Export finished", message)
-                                  )
-                                  broadcastError(message)
+                  val sourceResolution = probeSourceResolution(uri)
+                  val effectiveWidth = width ?: sourceResolution?.first ?: 1280
+                  val effectiveHeight = height ?: sourceResolution?.second ?: 720
+                  val effectiveBitrate = bitrate ?: calculateDefaultBitrate(effectiveWidth, effectiveHeight)
+
+                  val startSeconds = startMs / 1000.0
+                  val durationSeconds = (endMs - startMs).coerceAtLeast(0L) / 1000.0
+                  val totalDurationMs = (endMs - startMs).coerceAtLeast(1L)
+                  val scaleFilter = buildScaleFilter(width, height)
+                  val isMp4 = extension.equals("mp4", ignoreCase = true)
+
+                  val args = mutableListOf(
+                      "-y",
+                      "-ss", startSeconds.toString(),
+                      "-i", inputFile.absolutePath,
+                      "-t", durationSeconds.toString()
+                  )
+                  scaleFilter?.let { args += listOf("-vf", it) }
+                  args += listOf(
+                      "-c:v", "libx264",
+                      "-preset", "veryfast",
+                      "-b:v", effectiveBitrate.toString(),
+                      "-maxrate", effectiveBitrate.toString(),
+                      "-bufsize", (effectiveBitrate * 2).toString(),
+                      "-c:a", "aac",
+                      "-b:a", "128k"
+                  )
+                  if (isMp4) {
+                      args += listOf("-movflags", "+faststart")
+                  }
+                  args += outputFile.absolutePath
+
+                  val session = FFmpegKit.executeWithArgumentsAsync(
+                      args.toTypedArray(),
+                      { completedSession ->
+                          activeSession = null
+                          val returnCode = completedSession.returnCode
+                          when {
+                              ReturnCode.isSuccess(returnCode) -> {
+                                  val downloadsUri = saveToDownloads(outputFile, outputName, mimeTypeForExtension(extension))
+                                  inputFile.delete()
+                                  outputFile.delete()
+                                  if (downloadsUri != null) {
+                                      notificationManager.notify(
+                                          NOTIFICATION_ID,
+                                          buildFinalNotification("Export complete", "Saved to Download/$outputName")
+                                      )
+                                      broadcastComplete(downloadsUri, outputName)
+                                  } else {
+                                      finishWithError("Saving to Downloads failed")
+                                  }
                               }
-                              stopForeground(STOP_FOREGROUND_DETACH)
-                              stopSelf()
+                              ReturnCode.isCancel(returnCode) -> {
+                                  inputFile.delete()
+                                  outputFile.delete()
+                              }
+                              else -> {
+                                  inputFile.delete()
+                                  outputFile.delete()
+                                  finishWithError("FFmpeg failed (rc=$returnCode): ${completedSession.failStackTrace ?: "see logs"}")
+                              }
                           }
-
-                          override fun onError(
-                              composition: Composition,
-                              result: ExportResult,
-                              exception: ExportException
-                          ) {
-                              progressHandler.removeCallbacks(progressRunnable)
-                              val message = exception.message ?: "Unknown error"
-                              notificationManager.notify(NOTIFICATION_ID, buildFinalNotification("Export failed", message))
-                              broadcastError(message)
-                              stopForeground(STOP_FOREGROUND_DETACH)
-                              stopSelf()
-                          }
-                      })
-
-                  if (bitrate != null) {
-                      transformerBuilder.setEncoderFactory(
-                          DefaultEncoderFactory.Builder(applicationContext)
-                              .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(bitrate).build())
-                              .build()
-                      )
-                  }
-
-                  val newTransformer = transformerBuilder.build()
-                  transformer = newTransformer
-                  newTransformer.start(editedMediaItemBuilder.build(), file.absolutePath)
-                  progressHandler.post(progressRunnable)
+                          stopForeground(STOP_FOREGROUND_DETACH)
+                          stopSelf()
+                      },
+                      { /* log callback: ignored, FFmpeg logs are verbose */ },
+                      { statistics: Statistics ->
+                          val progress = ((statistics.time.toDouble() / totalDurationMs) * 100)
+                              .toInt().coerceIn(0, 100)
+                          updateNotification(progress)
+                          broadcastProgress(progress)
+                      }
+                  )
+                  activeSession = session
               }
 
-              private fun saveToDownloads(sourceFile: File, displayName: String): Uri? {
+              private fun finishWithError(message: String) {
+                  notificationManager.notify(NOTIFICATION_ID, buildFinalNotification("Export failed", message))
+                  broadcastError(message)
+              }
+
+              private fun saveToDownloads(sourceFile: File, displayName: String, mimeType: String): Uri? {
                   val values = ContentValues().apply {
                       put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-                      put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                      put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
                       put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                   }
                   val itemUri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
@@ -964,9 +1056,8 @@ jobs:
 
               override fun onDestroy() {
                   super.onDestroy()
-                  progressHandler.removeCallbacks(progressRunnable)
-                  transformer?.cancel()
-                  transformer = null
+                  activeSession?.cancel()
+                  activeSession = null
               }
           }
           EXPORT_SERVICE
