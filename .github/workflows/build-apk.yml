@@ -130,9 +130,11 @@ jobs:
               // pulled from Maven Central in April 2025). Needed because Media3's Transformer can
               // only mux to MP4 - real MKV output requires an actual FFmpeg muxer.
               // NOTE: this is a third-party, unofficial artifact, not an Anthropic- or
-              // Google-maintained one - verify it still resolves/builds before relying on it,
-              // and note it links GPL-licensed x264/x265 encoders (license implications if you
-              // distribute this app).
+              // Google-maintained one - verify it still resolves/builds before relying on it.
+              // We encode with the hardware h264_mediacodec encoder (not libx264) so this works
+              // regardless of whether this particular build variant bundles GPL codecs - but the
+              // .aar itself may still contain GPL-licensed components even if unused at runtime,
+              // so the distribution-licensing caveat still applies if you ever ship this app.
               implementation 'com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1'
           }
           APP_BUILD_GRADLE
@@ -785,6 +787,7 @@ jobs:
 
               private var activeSession: FFmpegSession? = null
               private lateinit var notificationManager: NotificationManager
+              private val recentLogLines = ArrayDeque<String>()
 
               override fun onCreate() {
                   super.onCreate()
@@ -893,6 +896,7 @@ jobs:
                   outputName: String
               ) {
                   val extension = outputName.substringAfterLast('.', "mp4")
+                  recentLogLines.clear()
                   val outputFile = File(cacheDir, outputName)
                   val inputFile = File(cacheDir, "source_${System.currentTimeMillis()}.$extension")
 
@@ -927,8 +931,7 @@ jobs:
                   )
                   scaleFilter?.let { args += listOf("-vf", it) }
                   args += listOf(
-                      "-c:v", "libx264",
-                      "-preset", "veryfast",
+                      "-c:v", "h264_mediacodec",
                       "-b:v", effectiveBitrate.toString(),
                       "-maxrate", effectiveBitrate.toString(),
                       "-bufsize", (effectiveBitrate * 2).toString(),
@@ -967,13 +970,17 @@ jobs:
                               else -> {
                                   inputFile.delete()
                                   outputFile.delete()
-                                  finishWithError("FFmpeg failed (rc=$returnCode): ${completedSession.failStackTrace ?: "see logs"}")
+                                  val logTail = recentLogLines.joinToString("\n").takeLast(1500)
+                                  finishWithError("FFmpeg failed (rc=$returnCode): $logTail")
                               }
                           }
                           stopForeground(STOP_FOREGROUND_DETACH)
                           stopSelf()
                       },
-                      { /* log callback: ignored, FFmpeg logs are verbose */ },
+                      { log ->
+                          recentLogLines.addLast(log.message)
+                          if (recentLogLines.size > 40) recentLogLines.removeFirst()
+                      },
                       { statistics: Statistics ->
                           val progress = ((statistics.time.toDouble() / totalDurationMs) * 100)
                               .toInt().coerceIn(0, 100)
